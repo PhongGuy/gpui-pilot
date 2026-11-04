@@ -1,0 +1,17 @@
+[package]
+name = "pilot-demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+gpui-pilot-host = { path = "../gpui-pilot-host" }
+
+[dev-dependencies]
+gpui-pilot-protocol = { path = "../gpui-pilot-protocol" }
+tempfile.workspace = true

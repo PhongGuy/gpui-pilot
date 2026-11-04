@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Cargo monthly, as one grouped PR. The gpui crates move together with
+  # gpui-kit and a new release tag, so they are bumped by hand.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      cargo:
+        patterns:
+          - "*"
+    ignore:
+      - dependency-name: "gpui*"

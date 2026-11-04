@@ -1,0 +1,6 @@
+# Every process cargo runs, test binaries included, is cut off from the desktop's D-Bus
+# buses: gpui-kit's portal queries and the GPU driver would otherwise reach them. Same
+# address as `run` uses in gpui-pilot-host.
+[env]
+DBUS_SYSTEM_BUS_ADDRESS = { value = "unix:path=/nonexistent/gpui-pilot-no-bus", force = true }
+DBUS_SESSION_BUS_ADDRESS = { value = "unix:path=/nonexistent/gpui-pilot-no-bus", force = true }
