@@ -1,0 +1,24 @@
+[package]
+name = "gpui-pilot-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-pilot-protocol = { path = "../gpui-pilot-protocol" }
+reis = { version = "=0.7.1", default-features = false }
+xkbcommon = { version = "=0.9.0", default-features = false, features = ["wayland"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["blocking-api", "async-io"] }
+atspi-proxies = "=0.14.0"
+atspi-common = "=0.14.0"
+wl-clipboard-rs = "=0.9.4"
+wayland-client = "=0.31.15"
+image.workspace = true
+rustix = { workspace = true, features = ["event", "time", "net"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
