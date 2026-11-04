@@ -1,13 +1,11 @@
 version: 2
 updates:
-  # Cargo every two weeks, as one grouped PR. The gpui crates move together with
+  # Cargo monthly, as one grouped PR. The gpui crates move together with
   # gpui-kit and a new release tag, so they are bumped by hand.
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: "cron"
-      cronjob: "0 6 1,15 * *"
-      timezone: "Europe/Copenhagen"
+      interval: "monthly"
     groups:
       cargo:
         patterns:
