@@ -21,7 +21,7 @@ use gpui_kit::{
     App, Bounds, DragMoveEvent, ElementId, Entity, ExternalPaths, GlobalElementId,
     InspectorElementId, Interactivity, LayoutId, Modifiers, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, PromptLevel, Role, ScrollDelta,
-    ScrollWheelEvent, TestSupportExt as _, UniformListScrollHandle, Window, WindowDecorations,
+    ScrollEvent, TestSupportExt as _, UniformListScrollHandle, Window, WindowDecorations,
     WindowHandle, WindowOptions, accesskit, div, px, uniform_list,
 };
 
@@ -694,15 +694,13 @@ impl Render for DemoView {
             // every wheel event too and counts the line ones a real wheel notch produces.
             return div()
                 .size_full()
-                .on_scroll_wheel(
-                    cx.listener(|view: &mut Self, event: &ScrollWheelEvent, _, cx| {
-                        if let ScrollDelta::Lines(lines) = event.delta {
-                            view.wheels += 1;
-                            view.wheel_lines += lines.y;
-                            cx.notify();
-                        }
-                    }),
-                )
+                .on_scroll(cx.listener(|view: &mut Self, event: &ScrollEvent, _, cx| {
+                    if let ScrollDelta::Lines(lines) = event.delta {
+                        view.wheels += 1;
+                        view.wheel_lines += lines.y;
+                        cx.notify();
+                    }
+                }))
                 .child(
                     uniform_list("list", LIST_ROWS, |rows, _, _| {
                         rows.map(|i| div().h(px(24.)).child(format!("row {i}")))
@@ -768,17 +766,15 @@ impl Render for DemoView {
             )
             // A control wheel counts a zoom, as an app's ctrl+scroll would; otherwise only the
             // first wheel event notifies, so the observer prints one new state line.
-            .on_scroll_wheel(
-                cx.listener(|view: &mut Self, event: &ScrollWheelEvent, _, cx| {
-                    if event.modifiers.control {
-                        view.zoom += 1;
-                        cx.notify();
-                    } else if !view.scrolled {
-                        view.scrolled = true;
-                        cx.notify();
-                    }
-                }),
-            )
+            .on_scroll(cx.listener(|view: &mut Self, event: &ScrollEvent, _, cx| {
+                if event.modifiers.control {
+                    view.zoom += 1;
+                    cx.notify();
+                } else if !view.scrolled {
+                    view.scrolled = true;
+                    cx.notify();
+                }
+            }))
             .p(px(16.))
             .gap(px(8.))
             .child(div().child(format!("clicks: {}", self.clicks)))

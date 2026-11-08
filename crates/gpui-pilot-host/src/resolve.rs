@@ -2,6 +2,7 @@
 //! nodes. Only the non-asserting snapshot getters are read; kit lookups would panic.
 
 use std::cmp::{Ordering, Reverse};
+use std::collections::HashMap;
 
 use crate::layers::Layer;
 use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
@@ -62,22 +63,51 @@ impl Observed {
     }
 }
 
+/// gpui-base's `EDITOR_ELEMENT_ID` (crate-private): the last segment of a kit Input's editor.
+const EDITOR_ELEMENT_ID: &str = "input-state";
+
 /// The window's snapshots, converted without calling any asserting getter.
+///
+/// A kit Input's id names a role-less frame that declares its editor, at `frame/View/input-state`,
+/// as semantic owner. The frame is reported as gpui-base's `find` reports it: its own path and
+/// bounds, with the editor's semantics. The editor keeps its own entry too.
 pub fn observe(window: &Window) -> Vec<Observed> {
-    snapshots(window)
+    let snapshots = snapshots(window);
+    let editors: HashMap<&[ElementId], &ElementSnapshot> = snapshots
         .iter()
-        .map(|snapshot| Observed {
-            path: snapshot.path().to_vec(),
-            role: snapshot.role(),
-            label: snapshot.label().map(str::to_owned),
-            value: snapshot.value().map(str::to_owned),
-            bounds: snapshot.bounds(),
-            visible: snapshot.visible(),
-            checked: snapshot.checked(),
-            selected: snapshot.selected(),
-            expanded: snapshot.expanded(),
-            disabled: snapshot.disabled(),
-            layer: None,
+        .filter_map(|snapshot| {
+            let path = snapshot.path();
+            match path {
+                [frame @ .., ElementId::View(_), ElementId::Name(last)]
+                    if last.as_ref() == EDITOR_ELEMENT_ID =>
+                {
+                    Some((frame, snapshot))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    snapshots
+        .iter()
+        .map(|snapshot| {
+            let semantics = editors
+                .get(snapshot.path())
+                .filter(|_| snapshot.role().is_none())
+                .copied()
+                .unwrap_or(snapshot);
+            Observed {
+                path: snapshot.path().to_vec(),
+                role: semantics.role(),
+                label: semantics.label().map(str::to_owned),
+                value: semantics.value().map(str::to_owned),
+                bounds: snapshot.bounds(),
+                visible: snapshot.visible(),
+                checked: semantics.checked(),
+                selected: semantics.selected(),
+                expanded: semantics.expanded(),
+                disabled: semantics.disabled(),
+                layer: None,
+            }
         })
         .collect()
 }

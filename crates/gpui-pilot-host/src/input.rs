@@ -3,8 +3,8 @@
 
 use gpui_kit::{
     App, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, ScrollDelta, ScrollWheelEvent,
-    Window, point, px,
+    MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels, PlatformInput, Point, ScrollDelta,
+    ScrollEvent, Window, point, px,
 };
 pub use gpui_pilot_protocol::{MAX_NOTCHES, NOTCH_MS_RANGE};
 
@@ -89,7 +89,10 @@ pub fn text_keystrokes(text: &str) -> Vec<Keystroke> {
 pub fn parse_keys(keys: &str) -> Result<Vec<Keystroke>, String> {
     let parsed = keys
         .split_whitespace()
-        .map(|key| Keystroke::parse(key).map_err(|error| format!("{key:?}: {error}")))
+        .map(|key| {
+            Keystroke::parse_with_os(key, OperatingSystem::Linux)
+                .map_err(|error| format!("{key:?}: {error}"))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     if parsed.is_empty() {
         return Err("no keys were given".into());
@@ -111,7 +114,7 @@ pub fn scroll_events(
         modifiers,
         ..Default::default()
     });
-    let wheel = PlatformInput::ScrollWheel(ScrollWheelEvent {
+    let wheel = PlatformInput::Scroll(ScrollEvent {
         position: at,
         delta: ScrollDelta::Pixels(point(px(-dx), px(-dy))),
         modifiers,
@@ -171,7 +174,7 @@ pub fn notch_events(
         ..Default::default()
     }));
     let wheel = |lines: Point<f32>| {
-        PlatformInput::ScrollWheel(ScrollWheelEvent {
+        PlatformInput::Scroll(ScrollEvent {
             position: at,
             delta: ScrollDelta::Lines(lines),
             modifiers,
@@ -407,7 +410,7 @@ mod tests {
     fn scrolling_down_is_a_negative_wheel_delta() {
         let at = point(px(5.), px(6.));
         let events = scroll_events(at, 0.0, 120.0, Modifiers::default());
-        let Some(PlatformInput::ScrollWheel(wheel)) = events.last() else {
+        let Some(PlatformInput::Scroll(wheel)) = events.last() else {
             panic!("the last event scrolls: {events:?}");
         };
         assert_eq!(wheel.position, at);
@@ -428,7 +431,7 @@ mod tests {
         let [
             PlatformInput::ModifiersChanged(down),
             PlatformInput::MouseMove(moved),
-            PlatformInput::ScrollWheel(wheel),
+            PlatformInput::Scroll(wheel),
             PlatformInput::ModifiersChanged(up),
         ] = events.as_slice()
         else {
@@ -577,7 +580,7 @@ mod tests {
 
     fn lines(event: &PlatformInput) -> gpui_kit::Point<f32> {
         match event {
-            PlatformInput::ScrollWheel(gpui_kit::ScrollWheelEvent {
+            PlatformInput::Scroll(gpui_kit::ScrollEvent {
                 delta: ScrollDelta::Lines(lines),
                 ..
             }) => *lines,
@@ -594,7 +597,7 @@ mod tests {
         let deltas: Vec<_> = events.notches.iter().map(lines).collect();
         assert_eq!(deltas, [point(-3., 0.), point(0., 3.), point(0., 3.)]);
         for event in &events.notches {
-            let PlatformInput::ScrollWheel(wheel) = event else {
+            let PlatformInput::Scroll(wheel) = event else {
                 unreachable!()
             };
             assert_eq!(wheel.position, at);
@@ -617,7 +620,7 @@ mod tests {
             events.notches.iter().map(lines).collect::<Vec<_>>(),
             [point(-3., 0.)]
         );
-        let PlatformInput::ScrollWheel(wheel) = &events.notches[0] else {
+        let PlatformInput::Scroll(wheel) = &events.notches[0] else {
             unreachable!()
         };
         assert_eq!(wheel.modifiers, shift);

@@ -639,6 +639,9 @@ impl PlatformWindow for PilotWindow {
 
     fn on_moved(&self, _callback: Box<dyn FnMut()>) {}
 
+    // A pilot window stays on the platform's one display, which never changes.
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
+
     // Kept for `should_close` and `close`, which the executor calls on a window close request.
     fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
         self.0.borrow_mut().should_close = Some(callback);

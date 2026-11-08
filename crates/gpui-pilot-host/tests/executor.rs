@@ -3,7 +3,8 @@ mod common;
 use std::path::PathBuf;
 
 use common::{first_frame, with_demo};
-use gpui_pilot_host::Pilot;
+use gpui_kit::{ElementId, Role};
+use gpui_pilot_host::{Pilot, observe};
 use gpui_pilot_protocol::{
     Answered, ErrorCode, MouseButton, Outcome, PickAnswer, PromptKind, Reply, Request, Segment,
     Target,
@@ -78,6 +79,36 @@ fn type_then_key_edits_the_input() {
         h.demo.read_with(&h.cx, |demo, cx| demo.name_text(cx))
     });
     assert_eq!(text, "ab");
+}
+
+/// A kit Input's id names a role-less frame whose text lives on its inner editor; the frame is
+/// observed with the editor's role and value, as gpui-base's own `find` reports it.
+#[test]
+fn an_inputs_id_carries_its_editors_role_and_value() {
+    let name = with_demo(640., 400., 1.0, |mut h| async move {
+        first_frame(&h).await;
+        let pilot = Pilot::new(h.platform.clone());
+        let typed = Request::Type {
+            text: "abc".into(),
+            target: Some(id("name")),
+            timeout_ms: 1000,
+            settle_ms: 2000,
+        };
+        assert!(matches!(
+            pilot.handle(typed, &mut h.cx).await,
+            Outcome::Ok(Reply::Type { settled: true, .. })
+        ));
+        h.window
+            .update(&mut h.cx, |_, window, _| {
+                observe(window)
+                    .into_iter()
+                    .find(|o| o.path.last() == Some(&ElementId::Name("name".into())))
+            })
+            .expect("the demo window is open")
+    });
+    let name = name.expect("the name input is observed");
+    assert_eq!(name.role, Some(Role::TextInput));
+    assert_eq!(name.value.as_deref(), Some("abc"));
 }
 
 /// Typing into a masked input reports `masked`, so the server can keep the text out of its
