@@ -16,9 +16,10 @@ use futures::channel::oneshot;
 use gpui_kit::{
     Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle,
     ForegroundExecutor, GraphicalEnvironment, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions,
-    Pixels, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
-    PlatformTextSystem, PlatformWindow, Size, SystemNotification, SystemNotificationResponse, Task,
-    ThermalState, WindowAppearance, WindowButtonLayout, WindowParams, WindowingRequest,
+    Pixels, Platform, PlatformDisplay, PlatformInfo, PlatformKeyboardLayout,
+    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Size, SystemNotification,
+    SystemNotificationResponse, Task, ThermalState, WindowAppearance, WindowButtonLayout,
+    WindowParams, WindowingRequest,
 };
 
 use crate::dispatch::CountingDispatcher;
@@ -258,6 +259,10 @@ impl PilotPlatform {
 }
 
 impl Platform for PilotPlatform {
+    fn platform_info(&self) -> PlatformInfo {
+        self.inner.platform_info()
+    }
+
     fn background_executor(&self) -> BackgroundExecutor {
         self.background.clone()
     }
@@ -321,6 +326,9 @@ impl Platform for PilotPlatform {
     fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
         self.inner.primary_display()
     }
+
+    // The display set is fixed for the launch, so there is never a change to report.
+    fn on_displays_changed(&self, _callback: Box<dyn FnMut()>) {}
 
     // The newest window stands in front, so it is the active one once its first tick lands.
     fn active_window(&self) -> Option<AnyWindowHandle> {

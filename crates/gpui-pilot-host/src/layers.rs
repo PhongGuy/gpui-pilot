@@ -3,10 +3,11 @@
 //! drawn: a later rank is drawn, and hit, above an earlier one.
 
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 
 use gpui_kit::ElementId;
 use gpui_kit::accesskit::{NodeId, TreeUpdate};
+use rustc_hash::FxHasher;
 
 use crate::resolve::{Observed, is_overlay_role};
 
@@ -82,19 +83,22 @@ impl Layering {
     }
 }
 
-/// GPUI's accesskit node id for the element at `path`: `GlobalElementId::accesskit_node_id`
-/// hashes its id slice with a default `DefaultHasher`, and a plain slice hashes the same way.
+/// GPUI's accesskit node id for the element at `path`: `GlobalElementId::accesskit_node_id` is
+/// the path hash, folded one id at a time by an `FxHasher` seeded with the prefix's hash.
 #[doc(hidden)]
 pub fn node_id(path: &[ElementId]) -> NodeId {
-    let mut hasher = DefaultHasher::default();
-    path.hash(&mut hasher);
-    NodeId(hasher.finish())
+    NodeId(path.iter().fold(0, |prefix, id| {
+        let mut hasher = FxHasher::with_seed(prefix as usize);
+        id.hash(&mut hasher);
+        hasher.finish()
+    }))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    use std::sync::Arc;
+    use std::hash::{Hash, Hasher};
+
+    use rustc_hash::FxHasher;
 
     use super::*;
     use crate::Observed;
@@ -204,12 +208,17 @@ mod tests {
     }
 
     #[test]
-    fn a_node_id_hashes_the_path_as_gpuis_global_id_does() {
+    fn a_node_id_folds_the_path_as_gpuis_global_id_does() {
+        // gpui-pre 0.3.11 `extend_path_hash`: each id hashed by an FxHasher seeded with the
+        // prefix's hash, starting from 0.
         let p = path(&["a", "b"]);
-        let global: Arc<[ElementId]> = p.clone().into();
-        let mut hasher = DefaultHasher::default();
-        global.hash(&mut hasher);
-        assert_eq!(node_id(&p), NodeId(hasher.finish()));
+        let expected = p.iter().fold(0_u64, |prefix, id| {
+            let mut hasher = FxHasher::with_seed(prefix as usize);
+            id.hash(&mut hasher);
+            hasher.finish()
+        });
+        assert_eq!(node_id(&p), NodeId(expected));
+        assert_ne!(node_id(&p), node_id(&path(&["b", "a"])));
     }
 
     #[test]

@@ -146,7 +146,8 @@ fn inner_tree() {
     assert!(count.visible && count.disabled.is_none());
     let name = by_id("name");
     assert_eq!(name.role.as_deref(), Some("Entry"));
-    assert_eq!(name.bounds.y, 90.);
+    // Since gpui-kit 0.9 the id is on the Input's editor, inside its frame's 6 px padding.
+    assert_eq!(name.bounds.y, 96.);
     let frame = nodes
         .iter()
         .find(|n| n.path == vec![Segment::Int(0)])

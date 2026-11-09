@@ -43,14 +43,14 @@ Host files are made visible inside the sandbox with `binds` in the config. Launc
 
 The server and host agree on a protocol version in their first message. This release speaks protocol 11. The server still launches hosts back to protocol 7: it retries at the version the host names and answers `Unsupported` for the features an older host lacks (`resize` needs 11, `drop` 10, a right or middle `drag` 9, `modifiers` on `click` and `drag` 8). To use a newer feature, move the app's `gpui-pilot-host` to the matching tag and rebuild the pilot binary.
 
-Releases are git tags with a semver version, for example `v0.1.0`. Each release states the gpui-kit version its host is built against; v0.1.0 is built against gpui-kit 0.7.1. Use the same tag for the server and the host.
+Releases are git tags with a semver version, for example `v0.2.0`. Each release states the gpui-kit version its host is built against: v0.1.0 is built against gpui-kit 0.7.1, v0.2.0 against gpui-kit 0.9.0. Use the same tag for the server and the host.
 
 ## Requirements
 
 - Linux. The host builds on GPUI's Linux platform, and the server uses Unix sockets and Linux namespaces. macOS and Windows are not supported.
 - Rust 1.99 or newer.
 - A GPU that GPUI's wgpu renderer can use, plus the system libraries GPUI needs on Linux. Headless mode renders on the GPU even with no display.
-- An app on gpui-kit 0.7.1, the version the host pins.
+- An app on gpui-kit 0.9.0, the version the host pins.
 - For session mode, also:
   - `bwrap` (bubblewrap), with unprivileged user namespaces enabled;
   - `kwin_wayland` (KDE Plasma 6) and `dbus-run-session`;
@@ -63,7 +63,7 @@ Releases are git tags with a semver version, for example `v0.1.0`. Each release 
 ## Install the server
 
 ```sh
-cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.1.0 gpui-pilot
+cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.2.0 gpui-pilot
 ```
 
 This installs `gpui-pilot` into `~/.cargo/bin`. `gpui-pilot mcp` (or `gpui-pilot` with no argument) serves MCP over stdio.
@@ -127,8 +127,8 @@ publish = false
 
 [dependencies]
 my-app = { path = "../../crates/my-app" }
-gpui-kit = "=0.7.1"
-gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.1.0" }
+gpui-kit = "=0.9.0"
+gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.2.0" }
 anyhow = "1"
 
 # Optional: optimised dependencies make the app much faster under the pilot.
@@ -268,7 +268,7 @@ printf '%s\n' 'launch {"mode": "headless"}' \
 - `drop` is headless only.
 - Headless mode shares the host's network; use session mode with `none` or `pasta` when the app must not reach it.
 - `frames` numbers are only meaningful when the app's dependencies are built optimised.
-- The host pins gpui-kit 0.7.1; an app on another gpui-kit version needs a host release built for that version.
+- The host pins gpui-kit 0.9.0; an app on another gpui-kit version needs a host release built for that version.
 
 ## Licence
 

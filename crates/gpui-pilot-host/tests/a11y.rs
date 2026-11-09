@@ -7,7 +7,8 @@ use std::time::Duration;
 use common::{first_frame, tree_of, with_demo};
 use gpui_kit::QuitMode;
 use gpui_kit::accesskit::Role;
-use gpui_pilot_host::{Layering, Pilot, node_id, observe, settle};
+use gpui_kit::base::test_support::snapshots;
+use gpui_pilot_host::{Layering, Pilot, node_id, settle};
 
 #[test]
 fn the_window_keeps_gpuis_latest_accessibility_tree() {
@@ -65,14 +66,16 @@ fn every_roled_element_has_its_own_accessibility_node() {
         let layering = Layering::from_update(&tree);
         h.window
             .update(&mut h.cx, |_, window, _| {
-                let roled: Vec<_> = observe(window)
+                // Roles as registered, not as `observe` reports them: a kit Input's frame shows
+                // its editor's role but is presentational, so only the editor has a node.
+                let roled: Vec<_> = snapshots(window)
                     .into_iter()
-                    .filter(|o| o.role.is_some())
+                    .filter(|s| s.role().is_some())
                     .collect();
                 let missing: Vec<String> = roled
                     .iter()
-                    .filter(|o| !layering.contains(node_id(&o.path)))
-                    .map(|o| format!("{:?}", o.path))
+                    .filter(|s| !layering.contains(node_id(s.path())))
+                    .map(|s| format!("{:?}", s.path()))
                     .collect();
                 (roled.len(), missing)
             })
