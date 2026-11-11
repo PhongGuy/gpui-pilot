@@ -2709,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-pilot"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "base64 0.22.1",
  "gpui-pilot-protocol",
@@ -2726,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-pilot-host"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "async-task",
@@ -2742,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-pilot-protocol"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-pilot-session"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "atspi-common 0.14.0",
  "atspi-proxies 0.14.0",
@@ -5363,7 +5363,7 @@ checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 
 [[package]]
 name = "pilot-demo"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "futures",
