@@ -29,6 +29,12 @@ The server starts your pilot binary (the one that calls `gpui_pilot_host::run`) 
 
 Headless mode shares the host's network. It is fast, needs no desktop, and is the mode to use for most checks.
 
+The headless tree lists the elements an app registers for tests. It also lists the gpui-kit list rows an app does not register, such as the rows of an open `Select`, which it reads from GPUI's accessibility tree:
+
+- **Ids:** each row's path ends in `a11y-listitem-<n>`, numbered in drawn order. When its list has no registered id, the path also has an `a11y-list-<k>` segment before that. Pass the whole path as an `id` target to click one.
+- **Lifetime:** an id is valid for the tree that showed it; scrolling or filtering renumbers the rows.
+- **Names:** these rows carry no names. An app that renders its rows with its own `id(..).test_support()` gets ids named after their values, and those take precedence.
+
 ### Session mode
 
 The server starts your normal debug app binary inside a private KDE session: a `kwin_wayland` compositor on a virtual output, its own D-Bus session bus, the AT-SPI accessibility registry and the KDE file dialog portal, all inside a `bwrap` sandbox. The sandbox has its own PID and IPC namespaces, a fresh `/tmp`, `/run` and `/run/user`, read-only `/usr`, `/etc` and `/sys`, and access to the GPU devices. Before the app starts, the server checks that the user's session bus and X11 sockets cannot be reached from inside, and refuses to run if they can.
