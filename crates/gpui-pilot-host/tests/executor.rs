@@ -414,6 +414,8 @@ fn a_plain_selects_rows_are_listed_and_clicked_from_the_accessibility_tree() {
             .into_iter()
             .find(|(_, rows)| rows.len() == 3)
             .expect("a synthetic list with the three plain rows");
+        // The popup is deferred to the window root, where it is the only unregistered list.
+        assert_eq!(list, "a11y-list-1");
         let second = Target::Id {
             id: vec![
                 Segment::Str(list.clone()),

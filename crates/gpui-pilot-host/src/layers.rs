@@ -338,9 +338,6 @@ mod tests {
         assert_eq!(seen[1].layer, None);
     }
 
-    use gpui_kit::accesskit::Rect;
-    use gpui_kit::{Bounds, Pixels};
-
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Rect {
         Rect { x0, y0, x1, y1 }
     }
@@ -543,6 +540,29 @@ mod tests {
         assert_eq!(
             rows(&update, &[], 2.0)[0].bounds,
             bounds(point(px(0.), px(20.)), size(px(200.), px(20.)))
+        );
+    }
+
+    #[test]
+    fn a_row_without_bounds_or_off_the_window_is_not_visible() {
+        let list = NodeId(100);
+        let mut unbounded_list = Node::new(Role::List);
+        unbounded_list.set_children(vec![NodeId(101), NodeId(102), NodeId(103)]);
+        let update = tree(
+            vec![list],
+            vec![
+                (NodeId(101), Node::new(Role::ListItem)),
+                (NodeId(102), item(rect(0., 1990., 200., 2010.))),
+                (NodeId(103), item(rect(0., 0., 200., 20.))),
+                (list, unbounded_list),
+            ],
+        );
+        // The list has no bounds, so only the window clips: 101 has no bounds of its own and
+        // 102's centre (y 2000) is below the 1000 px screen.
+        let found = rows(&update, &[], 1.0);
+        assert_eq!(
+            found.iter().map(|o| o.visible).collect::<Vec<_>>(),
+            [false, false, true]
         );
     }
 
