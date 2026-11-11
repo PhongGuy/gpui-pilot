@@ -18,11 +18,11 @@ use gpui_pilot_protocol::{
 use image::{ImageFormat, imageops};
 
 use crate::{
-    Actionable, Dialog, Frame, Layering, MAX_NOTCHES, NOTCH_MS_RANGE, PathPrompt, PilotPlatform,
-    PilotWindow, PromptAnswered, Resolved, actionable, click_events, dispatch_events,
-    dispatch_keystrokes, drag_move, drag_path, drag_press, drag_release, focused_input_masked,
-    hover_events, notch_events, observe, parse_keys, resolve, scroll_events, settle, subtree,
-    text_keystrokes, to_nodes,
+    Actionable, Dialog, Frame, Layering, MAX_NOTCHES, NOTCH_MS_RANGE, Observed, PathPrompt,
+    PilotPlatform, PilotWindow, PromptAnswered, Resolved, a11y_only, actionable, click_events,
+    dispatch_events, dispatch_keystrokes, drag_move, drag_path, drag_press, drag_release,
+    focused_input_masked, hover_events, notch_events, observe, parse_keys, resolve, scroll_events,
+    settle, subtree, text_keystrokes, to_nodes,
 };
 
 /// How often `tree` re-reads the snapshots while it waits for its target.
@@ -487,27 +487,11 @@ impl Pilot {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let once = timeout_ms == 0 || matches!(target, Target::Point { .. });
         let mut stable_since: Option<Rect> = None;
-        let pilot_window = window;
         loop {
             let expired = Instant::now() >= deadline;
-            // Draw pending changes inactive first, so a menu an unsettled input opened never
-            // opens on the forced frame.
-            pilot_window.tick();
-            // Draw one frame with accessibility on, then rank, turn it off and dispatch in one
-            // update, so the tree matches the snapshots and the input's frame runs inactive.
-            // A cached view reused without re-render still adds no nodes that frame.
-            let a11y = A11yScope::activate(pilot_window);
-            on_window(pilot_window, cx, |window, _| {
-                window.refresh();
-                Ok(())
-            })?;
-            pilot_window.tick();
-            let (result, acted) = on_window(pilot_window, cx, |window, cx| {
-                let mut observed = observe(window);
-                if let Some(tree) = pilot_window.a11y_tree() {
-                    Layering::from_update(&tree).assign(&mut observed);
-                }
-                a11y.end();
+            // Rank, turn accessibility off and dispatch in the forced frame's update, so the
+            // tree matches the snapshots and the input's frame runs inactive.
+            let (result, acted) = observe_with_a11y(window, cx, |observed, window, cx| {
                 let result = actionable(&observed, target, need_enabled);
                 let ready = result.as_ref().is_ok_and(|a| {
                     once || expired || stable_since.as_ref() == Some(&a.node.bounds)
@@ -554,7 +538,7 @@ impl Pilot {
         self.settle(window, cx, settle_ms).await;
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let observed = loop {
-            let observed = on_window(window, cx, |window, _| Ok(observe(window)))?;
+            let observed = observe_with_a11y(window, cx, |observed, _, _| Ok(observed))?;
             let Some(wanted) = &wait_for else {
                 break observed;
             };
@@ -668,7 +652,7 @@ impl Pilot {
         }
         let deadline = started + Duration::from_millis(timeout_ms);
         loop {
-            let observed = on_window(window, cx, |window, _| Ok(observe(window)))?;
+            let observed = observe_with_a11y(window, cx, |observed, _, _| Ok(observed))?;
             let resolved = resolve(&observed, &target);
             let poll = if gone {
                 gone_poll(resolved)
@@ -711,16 +695,22 @@ impl Pilot {
             }
             self.platform.pilot_timers().timer(POLL).await;
         };
-        let (scale, area) = on_window(window, cx, |window, _| {
-            let area = match &target {
-                None => None,
-                Some(Target::Point { .. }) => {
-                    return Err(unsupported("a screenshot target must be an element"));
-                }
-                Some(target) => Some(element(resolve(&observe(window), target)?)?.bounds),
-            };
-            Ok((window.scale_factor(), area))
-        })?;
+        // An element target is looked up as `act` sees it, a11y-only rows included.
+        let (scale, area) = match &target {
+            None => (
+                on_window(window, cx, |window, _| Ok(window.scale_factor()))?,
+                None,
+            ),
+            Some(Target::Point { .. }) => {
+                return Err(unsupported("a screenshot target must be an element"));
+            }
+            Some(target) => {
+                let (observed, scale) = observe_with_a11y(window, cx, |observed, window, _| {
+                    Ok((observed, window.scale_factor()))
+                })?;
+                (scale, Some(element(resolve(&observed, target)?)?.bounds))
+            }
+        };
         let image = &*frame.image;
         let shot = match area {
             None => image.clone(),
@@ -757,6 +747,37 @@ fn on_window<T>(
 ) -> Handled<T> {
     cx.update_window(window.handle(), |_, window, cx| f(window, cx))
         .map_err(|error| not_running(format!("the window is gone: {error}")))?
+}
+
+/// Ticks inactive, draws one frame with accessibility on, then in one update observes the
+/// snapshots, ranks them, appends `a11y_only` rows, turns accessibility off and runs `f`.
+/// Without a tree the snapshots pass through unranked.
+fn observe_with_a11y<R>(
+    window: &PilotWindow,
+    cx: &mut AsyncApp,
+    f: impl FnOnce(Vec<Observed>, &mut Window, &mut gpui_kit::App) -> Handled<R>,
+) -> Handled<R> {
+    // Draw pending changes inactive first, so a menu an unsettled input opened never opens on
+    // the forced frame. A cached view reused without re-render still adds no nodes that frame.
+    window.tick();
+    let a11y = A11yScope::activate(window);
+    on_window(window, cx, |window, _| {
+        window.refresh();
+        Ok(())
+    })?;
+    window.tick();
+    on_window(window, cx, |gpui_window, cx| {
+        let mut observed = observe(gpui_window);
+        if let Some(tree) = window.a11y_tree() {
+            let layering = Layering::from_update(&tree);
+            layering.assign(&mut observed);
+            let scale = gpui_window.scale_factor();
+            let rows = a11y_only(&tree, &layering, &observed, scale, gpui_window.bounds());
+            observed.extend(rows);
+        }
+        a11y.end();
+        f(observed, gpui_window, cx)
+    })
 }
 
 /// One look at a `wait` target: finished, still waiting (with the error a timeout reports
