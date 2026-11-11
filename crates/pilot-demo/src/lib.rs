@@ -69,6 +69,9 @@ pub struct DemoView {
     pub held: Option<String>,
     pub answer: Option<usize>,
     pub env: Entity<SelectState<Vec<EnvItem>>>,
+    /// A Select of plain strings whose rows register no ids, so only GPUI's accessibility
+    /// tree carries them.
+    pub plain: Entity<SelectState<Vec<gpui_kit::SharedString>>>,
     /// Where the count is kept across a relaunch; `None` keeps it in memory only.
     pub persist: Option<PathBuf>,
     /// The `--dir` folder that `Touch` writes into.
@@ -239,6 +242,14 @@ impl DemoView {
             env: cx.new(|cx| {
                 SelectState::new(
                     vec![EnvItem("dev".into()), EnvItem("prod".into())],
+                    None,
+                    window,
+                    cx,
+                )
+            }),
+            plain: cx.new(|cx| {
+                SelectState::new(
+                    vec!["red".into(), "green".into(), "blue".into()],
                     None,
                     window,
                     cx,
@@ -1065,6 +1076,12 @@ impl Render for DemoView {
                         .on_click(cx.listener(|view: &mut Self, _, _, cx| view.repaint(cx))),
                 )
             })
+            // Last, so the fixtures above keep their positions.
+            .child(
+                div()
+                    .w(px(140.))
+                    .child(Select::new(&self.plain).id("plain")),
+            )
             .into_any_element()
     }
 }

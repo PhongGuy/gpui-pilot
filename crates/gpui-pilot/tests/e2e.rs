@@ -382,6 +382,51 @@ async fn select_rows_are_clicked_by_an_id_suffix() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_plain_selects_rows_are_clicked_by_their_synthetic_id() {
+    let pilot = Pilot::start(Some(&config())).await;
+    // `plain` is the demo's bottom-most child: the default 400 px window clips it.
+    let mut launch = launch_args();
+    launch["height"] = json!(700);
+    pilot.ok("launch", launch).await;
+    pilot.ok("click", json!({"target": id("plain")})).await;
+    let tree = pilot.ok("tree", json!({})).await;
+    let rows: Vec<&Value> = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| {
+            n["path"]
+                .as_array()
+                .unwrap()
+                .last()
+                .and_then(|s| s.as_str())
+                .is_some_and(|s| s.starts_with("a11y-listitem-"))
+        })
+        .collect();
+    assert!(rows.len() >= 3, "{tree}");
+    let row = rows
+        .iter()
+        .find(|n| ends_with(&n["path"], "a11y-listitem-3"))
+        .expect("a third synthetic row");
+    let path = row["path"].clone();
+    let clicked = pilot.ok("click", json!({"target": {"id": path}})).await;
+    assert!(
+        ends_with(&clicked["clicked"]["path"], "a11y-listitem-3"),
+        "{clicked}"
+    );
+    let tree = pilot.ok("tree", json!({})).await;
+    let plain = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| ends_with(&n["path"], "plain"))
+        .expect("the plain select is in the tree")
+        .clone();
+    assert_eq!(plain["value"], json!("blue"));
+    assert_eq!(pilot.ok("close", json!({})).await["exit_code"], json!(0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn keep_data_relaunches_on_the_same_data_until_the_server_exits() {
     let pilot = Pilot::start(Some(&config())).await;
     let mut args = launch_args();

@@ -9,7 +9,7 @@ use gpui_kit::base::Root;
 use gpui_kit::base::test_support::snapshots;
 use gpui_kit::{
     App, AppContext as _, Application, AsyncApp, Bounds, ElementId, Entity, MouseButton, Pixels,
-    WindowHandle, px, size,
+    Point, WindowBounds, WindowHandle, WindowOptions, px, size,
 };
 use gpui_pilot_host::{Frame, PilotPlatform, PilotWindow, Settled};
 use pilot_demo::DemoView;
@@ -80,9 +80,50 @@ where
     R: Send + 'static,
 {
     let platform = PilotPlatform::new(size(px(width), px(height)), scale, refresh_hz);
+    run_demo(platform, pilot_demo::open, body)
+}
+
+/// Runs pilot-demo with its window placed at `origin` on the screen, as a desktop app's
+/// remembered or cascaded window is; content coordinates still start at the window's corner.
+pub fn with_demo_placed<F, Fut, R>(width: f32, height: f32, origin: Point<Pixels>, body: F) -> R
+where
+    F: FnOnce(Harness) -> Fut + 'static,
+    Fut: Future<Output = R> + 'static,
+    R: Send + 'static,
+{
+    let platform = PilotPlatform::new(size(px(width), px(height)), 1.0, 60);
+    let place = move |cx: &mut App| {
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                origin,
+                size(px(width), px(height)),
+            ))),
+            ..WindowOptions::default()
+        };
+        let mut demo = None;
+        let window = cx.open_window(options, |window, cx| {
+            let view = cx.new(|cx| DemoView::new(window, cx));
+            demo = Some(view.clone());
+            cx.new(|cx| Root::new(view, window, cx))
+        })?;
+        Ok((window, demo.expect("open_window builds the root view")))
+    };
+    run_demo(platform, place, body)
+}
+
+fn run_demo<F, Fut, R>(
+    platform: Rc<PilotPlatform>,
+    open: impl FnOnce(&mut App) -> anyhow::Result<(WindowHandle<Root>, Entity<DemoView>)> + 'static,
+    body: F,
+) -> R
+where
+    F: FnOnce(Harness) -> Fut + 'static,
+    Fut: Future<Output = R> + 'static,
+    R: Send + 'static,
+{
     run_app(platform.clone(), move |cx, done| {
         pilot_demo::init(cx);
-        let (window, demo) = pilot_demo::open(cx).expect("open pilot-demo");
+        let (window, demo) = open(cx).expect("open pilot-demo");
         let harness = Harness {
             platform,
             window,

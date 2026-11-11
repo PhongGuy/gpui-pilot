@@ -2,8 +2,8 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{first_frame, with_demo};
-use gpui_kit::{ElementId, Role};
+use common::{first_frame, with_demo, with_demo_placed};
+use gpui_kit::{ElementId, Role, point, px};
 use gpui_pilot_host::{Pilot, observe};
 use gpui_pilot_protocol::{
     Answered, ErrorCode, MouseButton, Outcome, PickAnswer, PromptKind, Reply, Request, Segment,
@@ -346,4 +346,185 @@ fn enter_and_space_press_a_focused_button() {
         seen
     });
     assert_eq!(clicks, [1, 2]);
+}
+
+fn tree_nodes(outcome: Outcome) -> Vec<gpui_pilot_protocol::Node> {
+    match outcome {
+        Outcome::Ok(Reply::Tree { nodes, .. }) => nodes,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+fn whole_tree() -> Request {
+    Request::Tree {
+        within: None,
+        wait_for: None,
+        timeout_ms: 0,
+        settle_ms: 500,
+    }
+}
+
+fn str_path(node: &gpui_pilot_protocol::Node) -> Vec<String> {
+    node.path
+        .iter()
+        .map(|s| match s {
+            Segment::Str(s) => s.clone(),
+            Segment::Int(i) => i.to_string(),
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+/// The synthetic rows in `nodes`, grouped by their list segment.
+fn synthetic_groups(
+    nodes: &[gpui_pilot_protocol::Node],
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut groups = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for p in nodes.iter().map(str_path) {
+        if let [.., list, row] = p.as_slice()
+            && row.starts_with("a11y-listitem-")
+        {
+            groups.entry(list.clone()).or_default().push(row.clone());
+        }
+    }
+    groups
+}
+
+/// A plain kit Select registers no rows; the pilot lists them from GPUI's accessibility tree
+/// and clicks one by its synthetic id.
+#[test]
+fn a_plain_selects_rows_are_listed_and_clicked_from_the_accessibility_tree() {
+    let (rows, waited, chosen) = with_demo(640., 700., 1.0, |mut h| async move {
+        first_frame(&h).await;
+        let pilot = Pilot::new(h.platform.clone());
+        let open = Request::Click {
+            target: id("plain"),
+            button: MouseButton::Left,
+            count: 1,
+            modifiers: Vec::new(),
+            timeout_ms: 1000,
+            settle_ms: 2000,
+        };
+        assert!(matches!(
+            pilot.handle(open, &mut h.cx).await,
+            Outcome::Ok(Reply::Click { .. })
+        ));
+        let groups = synthetic_groups(&tree_nodes(pilot.handle(whole_tree(), &mut h.cx).await));
+        let (list, rows) = groups
+            .into_iter()
+            .find(|(_, rows)| rows.len() == 3)
+            .expect("a synthetic list with the three plain rows");
+        // The popup is deferred to the window root, where it is the only unregistered list.
+        assert_eq!(list, "a11y-list-1");
+        let second = Target::Id {
+            id: vec![
+                Segment::Str(list.clone()),
+                Segment::Str("a11y-listitem-2".into()),
+            ],
+        };
+        let waited = pilot
+            .handle(
+                Request::Wait {
+                    until: gpui_pilot_protocol::WaitUntil::Visible(second.clone()),
+                    timeout_ms: 1000,
+                },
+                &mut h.cx,
+            )
+            .await;
+        let click = Request::Click {
+            target: second,
+            button: MouseButton::Left,
+            count: 1,
+            modifiers: Vec::new(),
+            timeout_ms: 1000,
+            settle_ms: 2000,
+        };
+        assert!(matches!(
+            pilot.handle(click, &mut h.cx).await,
+            Outcome::Ok(Reply::Click { .. })
+        ));
+        let chosen = h
+            .demo
+            .read_with(&h.cx, |d, cx| d.plain.read(cx).selected_value().cloned());
+        (rows, waited, chosen)
+    });
+    assert_eq!(
+        rows,
+        ["a11y-listitem-1", "a11y-listitem-2", "a11y-listitem-3"]
+    );
+    assert!(
+        matches!(waited, Outcome::Ok(Reply::Wait { node: Some(_), .. })),
+        "{waited:?}"
+    );
+    assert_eq!(chosen.as_deref(), Some("green"));
+}
+
+/// A Select whose rows register themselves adds no synthetic rows.
+#[test]
+fn registered_select_rows_are_not_listed_twice() {
+    let (before, after, options) = with_demo(640., 400., 1.0, |mut h| async move {
+        first_frame(&h).await;
+        let pilot = Pilot::new(h.platform.clone());
+        let count = |nodes: &[gpui_pilot_protocol::Node]| {
+            synthetic_groups(nodes)
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+        };
+        let before = count(&tree_nodes(pilot.handle(whole_tree(), &mut h.cx).await));
+        let open = Request::Click {
+            target: id("env"),
+            button: MouseButton::Left,
+            count: 1,
+            modifiers: Vec::new(),
+            timeout_ms: 1000,
+            settle_ms: 2000,
+        };
+        pilot.handle(open, &mut h.cx).await;
+        let nodes = tree_nodes(pilot.handle(whole_tree(), &mut h.cx).await);
+        let options = nodes
+            .iter()
+            .filter(|n| {
+                str_path(n)
+                    .last()
+                    .is_some_and(|s| s.starts_with("env-option-"))
+            })
+            .count();
+        (before, count(&nodes), options)
+    });
+    assert_eq!(options, 2);
+    assert_eq!(after, before);
+}
+
+/// A window placed away from the screen's corner still reports its shown a11y-only rows as
+/// visible, since row bounds are relative to the window's content.
+#[test]
+fn a11y_rows_are_visible_in_a_window_placed_off_the_corner() {
+    let rows = with_demo_placed(640., 700., point(px(200.), px(400.)), |mut h| async move {
+        first_frame(&h).await;
+        let pilot = Pilot::new(h.platform.clone());
+        let open = Request::Click {
+            target: id("plain"),
+            button: MouseButton::Left,
+            count: 1,
+            modifiers: Vec::new(),
+            timeout_ms: 1000,
+            settle_ms: 2000,
+        };
+        assert!(matches!(
+            pilot.handle(open, &mut h.cx).await,
+            Outcome::Ok(Reply::Click { .. })
+        ));
+        tree_nodes(pilot.handle(whole_tree(), &mut h.cx).await)
+            .into_iter()
+            .filter(|n| {
+                str_path(n)
+                    .last()
+                    .is_some_and(|s| s.starts_with("a11y-listitem-"))
+            })
+            .map(|n| (str_path(&n), n.visible))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows.iter().all(|(_, visible)| *visible), "{rows:?}");
 }
