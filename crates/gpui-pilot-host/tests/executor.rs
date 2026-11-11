@@ -2,8 +2,8 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{first_frame, with_demo};
-use gpui_kit::{ElementId, Role};
+use common::{first_frame, with_demo, with_demo_placed};
+use gpui_kit::{ElementId, Role, point, px};
 use gpui_pilot_host::{Pilot, observe};
 use gpui_pilot_protocol::{
     Answered, ErrorCode, MouseButton, Outcome, PickAnswer, PromptKind, Reply, Request, Segment,
@@ -346,4 +346,64 @@ fn enter_and_space_press_a_focused_button() {
         seen
     });
     assert_eq!(clicks, [1, 2]);
+}
+
+fn tree_nodes(outcome: Outcome) -> Vec<gpui_pilot_protocol::Node> {
+    match outcome {
+        Outcome::Ok(Reply::Tree { nodes, .. }) => nodes,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+fn whole_tree() -> Request {
+    Request::Tree {
+        within: None,
+        wait_for: None,
+        timeout_ms: 0,
+        settle_ms: 500,
+    }
+}
+
+fn str_path(node: &gpui_pilot_protocol::Node) -> Vec<String> {
+    node.path
+        .iter()
+        .map(|s| match s {
+            Segment::Str(s) => s.clone(),
+            Segment::Int(i) => i.to_string(),
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+/// A window placed away from the screen's corner still reports its shown a11y-only rows as
+/// visible, since row bounds are relative to the window's content.
+#[test]
+fn a11y_rows_are_visible_in_a_window_placed_off_the_corner() {
+    let rows = with_demo_placed(640., 700., point(px(200.), px(400.)), |mut h| async move {
+        first_frame(&h).await;
+        let pilot = Pilot::new(h.platform.clone());
+        let open = Request::Click {
+            target: id("plain"),
+            button: MouseButton::Left,
+            count: 1,
+            modifiers: Vec::new(),
+            timeout_ms: 1000,
+            settle_ms: 2000,
+        };
+        assert!(matches!(
+            pilot.handle(open, &mut h.cx).await,
+            Outcome::Ok(Reply::Click { .. })
+        ));
+        tree_nodes(pilot.handle(whole_tree(), &mut h.cx).await)
+            .into_iter()
+            .filter(|n| {
+                str_path(n)
+                    .last()
+                    .is_some_and(|s| s.starts_with("a11y-listitem-"))
+            })
+            .map(|n| (str_path(&n), n.visible))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows.iter().all(|(_, visible)| *visible), "{rows:?}");
 }

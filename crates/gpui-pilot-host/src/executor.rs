@@ -8,7 +8,8 @@ use std::{
 };
 
 use gpui_kit::{
-    AppContext as _, AsyncApp, ExternalPaths, FileDropEvent, InputEvent as _, PromptLevel, Window,
+    AppContext as _, AsyncApp, Bounds, ExternalPaths, FileDropEvent, InputEvent as _, PromptLevel,
+    Window, point, px,
 };
 use gpui_pilot_protocol::{
     Answered, BuildInfo, DialogInfo, DialogLevel, ErrorCode, Modifier, MouseButton, Node, Outcome,
@@ -676,6 +677,21 @@ impl Pilot {
         }
     }
 
+    /// The latest presented frame, waiting up to `FRAME_WAIT` for the first one.
+    async fn presented_frame(&self, window: &PilotWindow) -> Handled<Frame> {
+        let started = Instant::now();
+        loop {
+            if let Some(frame) = latest_frame(window)? {
+                return Ok(frame);
+            }
+            if started.elapsed() >= FRAME_WAIT {
+                let message = "the window presented no frame within 2 s";
+                return Err(PilotError::new(ErrorCode::Timeout, message));
+            }
+            self.platform.pilot_timers().timer(POLL).await;
+        }
+    }
+
     /// Writes the latest frame, cropped to the target's bounds when one is given, as a PNG.
     async fn screenshot(
         &self,
@@ -684,23 +700,14 @@ impl Pilot {
         target: Option<Target>,
         path: &Path,
     ) -> Handled<Reply> {
-        let started = Instant::now();
-        let frame = loop {
-            if let Some(frame) = latest_frame(window)? {
-                break frame;
+        // An element target is looked up as `act` sees it, a11y-only rows included, and the
+        // frame is taken after that look so its pixels match the bounds.
+        let (frame, scale, area) = match &target {
+            None => {
+                let frame = self.presented_frame(window).await?;
+                let scale = on_window(window, cx, |window, _| Ok(window.scale_factor()))?;
+                (frame, scale, None)
             }
-            if started.elapsed() >= FRAME_WAIT {
-                let message = "the window presented no frame within 2 s";
-                return Err(PilotError::new(ErrorCode::Timeout, message));
-            }
-            self.platform.pilot_timers().timer(POLL).await;
-        };
-        // An element target is looked up as `act` sees it, a11y-only rows included.
-        let (scale, area) = match &target {
-            None => (
-                on_window(window, cx, |window, _| Ok(window.scale_factor()))?,
-                None,
-            ),
             Some(Target::Point { .. }) => {
                 return Err(unsupported("a screenshot target must be an element"));
             }
@@ -708,7 +715,8 @@ impl Pilot {
                 let (observed, scale) = observe_with_a11y(window, cx, |observed, window, _| {
                     Ok((observed, window.scale_factor()))
                 })?;
-                (scale, Some(element(resolve(&observed, target)?)?.bounds))
+                let area = element(resolve(&observed, target)?)?.bounds;
+                (self.presented_frame(window).await?, scale, Some(area))
             }
         };
         let image = &*frame.image;
@@ -772,7 +780,10 @@ fn observe_with_a11y<R>(
             let layering = Layering::from_update(&tree);
             layering.assign(&mut observed);
             let scale = gpui_window.scale_factor();
-            let rows = a11y_only(&tree, &layering, &observed, scale, gpui_window.bounds());
+            // Row centres are relative to the content, so visibility is judged against the
+            // window's own area, never its place on the screen.
+            let area = Bounds::new(point(px(0.), px(0.)), gpui_window.viewport_size());
+            let rows = a11y_only(&tree, &layering, &observed, scale, area);
             observed.extend(rows);
         }
         a11y.end();
