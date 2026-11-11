@@ -377,10 +377,11 @@ pub(crate) struct KeyArgs {
 pub(crate) struct ScrollArgs {
     /// The element or point to scroll over.
     pub target: TargetArg,
-    /// Horizontal scroll in logical pixels.
+    /// Horizontal scroll in logical pixels. Exact headless; in session mode it is sent as wheel
+    /// lines assuming 20 px lines, so the distance scales with the element's line height.
     #[serde(default)]
     pub dx: Option<f32>,
-    /// Vertical scroll in logical pixels.
+    /// Vertical scroll in logical pixels, with the same session-mode caveat as `dx`.
     #[serde(default)]
     pub dy: Option<f32>,
     /// Vertical wheel notches, positive down like `dy`; at most 200 either way.

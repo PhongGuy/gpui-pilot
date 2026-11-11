@@ -112,9 +112,9 @@ impl Eis {
         self.frame(&device)
     }
 
-    /// Scrolls by (`dx`, `dy`) logical pixels as one wheel event. KWin forwards smooth EIS
-    /// scroll without an axis source, which GPUI reads as a wheel and drops for lacking
-    /// `axis_value120`, so only the discrete form reaches the app.
+    /// Scrolls by about (`dx`, `dy`) logical pixels as one wheel event (see `wheel_units`).
+    /// KWin forwards smooth EIS scroll without an axis source, which GPUI reads as a wheel and
+    /// drops for lacking `axis_value120`, so only the discrete form reaches the app.
     pub(crate) fn scroll(&mut self, dx: f32, dy: f32) -> Result<(), SessionError> {
         let device = self.device(DeviceCapability::Scroll)?;
         interface::<ei::Scroll>(&device)?.scroll_discrete(wheel_units(dx), wheel_units(dy));
@@ -291,10 +291,10 @@ fn interface<T: ei::Interface>(device: &reis::event::Device) -> Result<T, Sessio
     })
 }
 
-/// Logical pixels as 1/120 wheel notches, scaled so KWin's axis value (15 px per notch)
-/// equals the pixels asked for; a nonzero scroll keeps at least one unit.
+/// Logical pixels as 1/120 wheel notches. GPUI scrolls a notch as 3 lines of the element's line
+/// height, so this assumes 20 px lines (60 px per notch); a nonzero scroll keeps one unit.
 fn wheel_units(px: f32) -> i32 {
-    const UNITS_PER_PX: f32 = 120. / 15.;
+    const UNITS_PER_PX: f32 = 120. / (3. * 20.);
     let units = (px * UNITS_PER_PX).round() as i32;
     match units {
         0 if px > 0. => 1,
@@ -314,14 +314,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logical_pixels_become_wheel_units_kwin_reports_as_the_same_pixels() {
+    fn logical_pixels_become_wheel_units_gpui_scrolls_as_the_same_pixels_on_20px_lines() {
         assert_eq!(
-            wheel_units(15.),
+            wheel_units(60.),
             120,
-            "one notch is 15 px in KWin's axis value"
+            "GPUI scrolls a notch as 3 lines, 60 px on a 20 px line"
         );
-        assert_eq!(wheel_units(40.), 320);
-        assert_eq!(wheel_units(-40.), -320);
+        assert_eq!(wheel_units(300.), 600, "300 px is 5 notches, not 20");
+        assert_eq!(wheel_units(-40.), -80);
+        assert_eq!(wheel_units(0.75), 2, "units keep sub-notch precision");
         assert_eq!(wheel_units(0.), 0);
         assert_eq!(
             wheel_units(0.01),

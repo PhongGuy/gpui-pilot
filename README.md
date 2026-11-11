@@ -41,6 +41,8 @@ The server starts your normal debug app binary inside a private KDE session: a `
 
 The element tree comes from AT-SPI, screenshots from KWin, and input from KWin's emulated input. This mode exercises the real Wayland path: real window placement, the real KDE file dialog (`pick_file`) and the real clipboard.
 
+Scrolling by pixels is approximate in session mode. The only scroll that reaches a GPUI app through KWin is the mouse wheel, and GPUI turns a notch into 3 lines of the scrolled element's line height. So `dx`/`dy` are sent as lines, assuming 20 px lines (60 px per notch). That is exact where lines are 20 px, and elements with other line heights scroll in proportion: GPUI's default text moves about 1.3 times as far. Use `notches` when the test needs exact wheel behaviour. Headless mode scrolls by exact pixels.
+
 The network in session mode is `none` by default: no network at all. With `pasta`, the app gets a user-mode network stack, and `launch {"host_ports": [8080]}` lets it reach a server on the host's `127.0.0.1:8080` and nothing else on the host's loopback.
 
 Host files are made visible inside the sandbox with `binds` in the config. Launch `args` that are absolute paths to existing files or folders are bound read-write at the same path, except device and kernel paths, Unix sockets, and anything that would expose the desktop session.

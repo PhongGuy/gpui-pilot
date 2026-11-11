@@ -262,13 +262,13 @@ fn inner_ctrl_scroll() {
         .unwrap()
         .bounds;
     let at = (b.x + b.w / 2., b.y + b.h / 2.);
-    // 15 px is one 120-unit notch, so one wheel event.
+    // 60 px is one 120-unit notch, so one wheel event.
     session
-        .scroll(demo.pid(), at, 0., 15., &[Modifier::Ctrl])
+        .scroll(demo.pid(), at, 0., 60., &[Modifier::Ctrl])
         .unwrap();
     demo.wait_state("clicks=0 name=\"\" zoom=1");
     // A plain scroll afterwards is no zoom: ctrl was released.
-    session.scroll(demo.pid(), at, 0., 15., &[]).unwrap();
+    session.scroll(demo.pid(), at, 0., 60., &[]).unwrap();
     demo.wait_state("clicks=0 name=\"\" scrolled zoom=1");
     println!("zoom ok");
 }
@@ -857,6 +857,32 @@ fn inner_frames() {
         "{gone:?}"
     );
     println!("frames ok");
+}
+
+#[test]
+fn eis_pixel_scroll_reaches_the_app_as_lines_of_20_px() {
+    outer("inner_pixel_scroll", "pixel scroll ok");
+}
+
+#[test]
+#[ignore = "runs inside the sandbox through eis_pixel_scroll_reaches_the_app_as_lines_of_20_px"]
+fn inner_pixel_scroll() {
+    if !inner() {
+        return;
+    }
+    let mut session = Session::start(OUTPUT).unwrap();
+    let list = Demo::spawn_args(&["--list"]);
+    list.wait_state("opened");
+    session
+        .wait_window(list.pid(), Duration::from_secs(15))
+        .unwrap();
+    // GPUI scrolls a notch as 3 lines, so 300 px on 20 px lines is 15 lines in one event;
+    // the old 15 px notch sent 60.
+    session
+        .scroll(list.pid(), (300., 200.), 0., 300., &[])
+        .unwrap();
+    list.wait_state("clicks=0 name=\"\" wheels=1 lines=-15");
+    println!("pixel scroll ok");
 }
 
 #[test]
