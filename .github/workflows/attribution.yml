@@ -1,0 +1,63 @@
+# Fails a pull request whose title, body or commits credit an AI agent; the git hooks
+# cannot see PR bodies or an outside contributor's commits. Install in a repo as
+# .github/workflows/attribution.yml, with config/git/hooks/_attribution-lib.sh copied to
+# .github/scripts/attribution-lib.sh. The library is read from the base branch, so a PR
+# cannot weaken the check that judges it.
+name: attribution
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  attribution:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Load the check from the base branch
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        # Only the PR that installs the check finds no library on its base; it is judged by its own copy.
+        run: |
+          lib=.github/scripts/attribution-lib.sh
+          git cat-file -e "$BASE^{commit}"
+          if git cat-file -e "$BASE:$lib" 2> /dev/null; then
+            git show "$BASE:$lib" > "$RUNNER_TEMP/attribution-lib.sh"
+          else
+            echo "::warning::$lib is not on the base branch yet; using this PR's copy."
+            cp "$lib" "$RUNNER_TEMP/attribution-lib.sh"
+          fi
+
+      - name: PR title and body
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          . "$RUNNER_TEMP/attribution-lib.sh"
+          if printf '%s\n\n%s\n' "$TITLE" "$BODY" | find_attribution; then
+            echo "::error::The PR title or body credits an AI agent (lines above)."
+            exit 1
+          fi
+
+      - name: Commit messages
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          . "$RUNNER_TEMP/attribution-lib.sh"
+          bad=0
+          for sha in $(git rev-list "$BASE..$HEAD"); do
+            if git log -1 --format=%B "$sha" | find_attribution; then
+              echo "::error::Commit $sha credits an AI agent (lines above)."
+              bad=1
+            fi
+          done
+          exit "$bad"
