@@ -220,6 +220,18 @@ refresh_hz = 60
 
 Unknown keys are an error, so a typo is reported rather than ignored. If you set `CARGO_TARGET_DIR`, point `binary` at the directory it names.
 
+### Launching a git worktree
+
+The server reads `gpui-pilot.toml` from the folder it was started in. To drive another branch checked out with `git worktree add`, pass that worktree's absolute path as `project_dir` to `launch`:
+
+```json
+{"mode": "headless", "project_dir": "/home/me/my-app/.worktrees/fix-sidebar"}
+```
+
+The config, the build command's working folder, `binary` and relative `binds` then come from the worktree, and a relative `pick_file` path or screenshot `save_to` resolves against it until the app closes. Only the server's own folder or a worktree of the same repository is accepted; another repository, a submodule, a relative path or a folder without `gpui-pilot.toml` is `InvalidArgument`. `keep_data` reuses kept data only from the same project folder.
+
+A worktree builds into its own `target/`, so its first build is a cold one and can take much longer than a build at the root.
+
 ## Tools
 
 Most tools take a target, which is one of:
@@ -233,7 +245,7 @@ Actions wait for the target to be actionable (`timeout_ms`), then for the app to
 
 | Tool | What it does |
 | --- | --- |
-| `launch` | Build and start the configured app in `headless` or `session` mode, with window size, scale, `args`, `env`, network, `host_ports`, `refresh_hz` and `keep_data`. |
+| `launch` | Build and start the configured app in `headless` or `session` mode, with window size, scale, `args`, `env`, network, `host_ports`, `refresh_hz`, `keep_data` and `project_dir` (a git worktree to launch from). |
 | `tree` | List the elements with their paths, roles, names, values, states and bounds, optionally only `within` one element; `max_chars` shortens long runs of similar rows. |
 | `screenshot` | Capture the window, or one element, as a PNG. |
 | `click` | Click an element or point, with a button, a click count and held modifiers. |

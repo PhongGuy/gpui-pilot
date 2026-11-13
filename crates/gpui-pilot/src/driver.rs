@@ -69,6 +69,8 @@ struct Running {
     /// Maps session pick paths; `None` for a headless app, which answers with host paths.
     stage: Option<Stage>,
     mode: Mode,
+    /// The folder this app was configured, built and launched from.
+    project: PathBuf,
 }
 
 /// A closed app's launch dir (and pick dirs), parked for a `keep_data` launch. Removed when
@@ -77,6 +79,8 @@ struct Kept {
     dir: LaunchDir,
     mode: Mode,
     stage: Option<Stage>,
+    /// The kept app's project folder; data is reused only by a launch from the same one.
+    project: PathBuf,
 }
 
 /// The request a pick sends, and the paths the app is given. Headless (`stage` None): the
@@ -338,8 +342,10 @@ impl Driver {
         }
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
+    /// The folder relative tool paths resolve against: the running app's project folder, else
+    /// the server root.
+    pub fn base(&self) -> &Path {
+        self.running.as_ref().map_or(&self.root, |r| &r.project)
     }
 
     /// `{ mode, network, pid, window: { w, h, scale }, data_dir, reused, build_ms, start_ms,
@@ -363,6 +369,12 @@ impl Driver {
             .with("field", "refresh_hz"));
         }
         let env = app_env(&args.env)?;
+        // The folder that supplies config, build, binary and binds for this launch. Its path is
+        // re-read at use; whoever could swap a parent folder in between could edit the config.
+        let project = match &args.project_dir {
+            Some(dir) => crate::project::resolve(&self.root, dir)?,
+            None => self.root.clone(),
+        };
         // A host that exited on its own is forgotten, so it never reports AlreadyRunning.
         if let Some(running) = &mut self.running
             && !matches!(running.host.group.child().try_wait(), Ok(None))
@@ -372,7 +384,7 @@ impl Driver {
         // Kept data is checked before anything else can fail, and a launch that does not ask
         // for it drops what was kept.
         if args.keep_data {
-            self.check_keep_data(&args)?;
+            self.check_keep_data(&args, &project)?;
         } else {
             self.kept = None;
         }
@@ -438,7 +450,7 @@ impl Driver {
             // close drops the old app whatever its outcome, which is all replace needs.
             let _ = self.close(args.keep_data);
         }
-        let config = Config::load(&self.root)?;
+        let config = Config::load(&project)?;
         let section = config.section(args.mode)?;
         // A session launch that names no network takes the config's default, checked like an
         // explicit one.
@@ -471,7 +483,7 @@ impl Driver {
             check_output(&output)?;
         }
         let build = if args.build {
-            run_build(&section.build, &self.root)?
+            run_build(&section.build, &project)?
         } else {
             Duration::ZERO
         };
@@ -493,7 +505,12 @@ impl Driver {
                 Ok(()) => (dir, stage),
                 Err(e) => {
                     let mode = args.mode;
-                    self.kept = Some(Kept { dir, mode, stage });
+                    self.kept = Some(Kept {
+                        dir,
+                        mode,
+                        stage,
+                        project,
+                    });
                     return Err(ToolError::new(
                         ErrorCode::LaunchFailed,
                         format!("cannot reuse the kept data: {e}"),
@@ -534,7 +551,7 @@ impl Driver {
                 }
                 let command = session_command(
                     section,
-                    &self.root,
+                    &project,
                     &dir,
                     &exe,
                     output,
@@ -555,7 +572,7 @@ impl Driver {
                 }
                 Ok((host, window))
             } else {
-                spawn_host(section, &self.root, &dir, params, &env, self.timeouts)
+                spawn_host(section, &project, &dir, params, &env, self.timeouts)
             }
         })();
         let (host, window) = match started {
@@ -563,7 +580,12 @@ impl Driver {
             Err(error) => {
                 if reused {
                     let (mode, stage) = (args.mode, kept_stage);
-                    self.kept = Some(Kept { dir, mode, stage });
+                    self.kept = Some(Kept {
+                        dir,
+                        mode,
+                        stage,
+                        project,
+                    });
                 }
                 return Err(error);
             }
@@ -598,14 +620,30 @@ impl Driver {
             shots: 0,
             stage,
             mode: args.mode,
+            project,
         });
         Ok(result)
     }
 
     /// The `keep_data` rules: a replaced app must be in the requested mode, and with nothing
-    /// running a kept dir of that mode must exist.
-    fn check_keep_data(&self, args: &LaunchArgs) -> Result<(), ToolError> {
+    /// running a kept dir of that mode must exist. Either way the data must come from the
+    /// launch's `project`, so one branch's data never meets another branch's build.
+    fn check_keep_data(&self, args: &LaunchArgs, project: &Path) -> Result<(), ToolError> {
         let invalid = |message: String| ToolError::new(ErrorCode::InvalidArgument, message);
+        let from = match (&self.running, &self.kept) {
+            (Some(running), _) if args.replace => Some(&running.project),
+            (None, Some(kept)) => Some(&kept.project),
+            _ => None,
+        };
+        if let Some(from) = from
+            && from != project
+        {
+            return Err(invalid(format!(
+                "the kept data is from the project at {}; launch from it to reuse the data",
+                from.display()
+            ))
+            .with("field", "project_dir"));
+        }
         match (&self.running, &self.kept) {
             (Some(running), _) if args.replace && running.mode != args.mode => {
                 Err(invalid(format!(
@@ -744,9 +782,21 @@ impl Driver {
     }
 
     /// Forwards a `PickFile` built by `PickFileArgs::request`, budgeting `settle_ms` plus, in
-    /// session mode, `timeout_ms`. The result is the reply's fields, plus `paths` when an
-    /// open or save answer carried mapped paths.
+    /// session mode, `timeout_ms`. Relative answer paths resolve against `base`. The result is
+    /// the reply's fields, plus `paths` when an open or save answer carried mapped paths.
     pub fn pick_file(&mut self, request: Request) -> Result<Value, ToolError> {
+        let request = match request {
+            Request::PickFile {
+                answer: PickAnswer::Paths(paths),
+                settle_ms,
+                timeout_ms,
+            } => Request::PickFile {
+                answer: PickAnswer::Paths(paths.iter().map(|p| absolute(self.base(), p)).collect()),
+                settle_ms,
+                timeout_ms,
+            },
+            other => other,
+        };
         let running = self.running.as_mut().ok_or_else(not_running)?;
         // Paths are staged before the call, which needs the driver back.
         let (request, paths) = pick_request(request, running.stage.as_mut())?;
@@ -812,7 +862,7 @@ impl Driver {
         let png = std::fs::read(&path)
             .map_err(|e| internal(format!("cannot read {}: {e}", path.display())))?;
         if let Some(save_to) = &args.save_to {
-            let save_to = absolute(&self.root, save_to);
+            let save_to = absolute(self.base(), save_to);
             std::fs::write(&save_to, &png)
                 .map_err(|e| internal(format!("writing {}: {e}", save_to.display())))?;
             result["saved_to"] = json!(save_to);
@@ -834,12 +884,18 @@ impl Driver {
             dir,
             stage,
             mode,
+            project,
             ..
         } = running;
         drop(host);
         if keep_data {
             result["data_dir"] = json!(dir.data());
-            self.kept = Some(Kept { dir, mode, stage });
+            self.kept = Some(Kept {
+                dir,
+                mode,
+                stage,
+                project,
+            });
         }
         if let Some(code) = status.and_then(|s| s.code()) {
             result["exit_code"] = json!(code);
@@ -1209,12 +1265,26 @@ mod tests {
 
     /// Stores `program` as the running host in `mode`, as a launch would; returns its launch dir.
     fn hold(driver: &mut Driver, program: &str, args: &[&str], mode: Mode) -> PathBuf {
+        let project = driver.root.clone();
+        hold_in(driver, program, args, mode, project, |_| {})
+    }
+
+    /// `hold` launched from `project`, with `peer` running on the host's end of the socket.
+    fn hold_in(
+        driver: &mut Driver,
+        program: &str,
+        args: &[&str],
+        mode: Mode,
+        project: PathBuf,
+        peer: impl FnOnce(std::os::unix::net::UnixStream) + Send + 'static,
+    ) -> PathBuf {
         let child = std::process::Command::new(program)
             .args(args)
             .process_group(0)
             .spawn()
             .unwrap();
-        let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        std::thread::spawn(move || peer(theirs));
         let host = Host {
             pid: child.id(),
             group: ProcessGroup::new(child),
@@ -1231,6 +1301,7 @@ mod tests {
             shots: 0,
             stage: None,
             mode,
+            project,
         });
         path
     }
@@ -1447,5 +1518,228 @@ mod tests {
             );
         }
         assert!(refuse_unsupported(&resize, RESIZE_VERSION).is_ok());
+    }
+
+    /// A driver rooted at a repository with a worktree; each folder gets its config text.
+    /// Returns the driver, the temp dir holding both, the root and the worktree.
+    fn worktree_fixture(
+        root_config: &str,
+        tree_config: &str,
+    ) -> (Driver, tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = short_temp();
+        let base = temp.path().canonicalize().unwrap();
+        let (root, tree) = (base.join("root"), base.join("wt"));
+        crate::project::tests::repo(&root);
+        crate::project::tests::worktree(&root, &tree, "wt");
+        std::fs::write(root.join(CONFIG_FILE), root_config).unwrap();
+        std::fs::write(tree.join(CONFIG_FILE), tree_config).unwrap();
+        let quick = Timeouts {
+            socket: Duration::from_millis(300),
+            hello: Duration::from_secs(1),
+        };
+        let driver = Driver::new(root.clone(), base, quick);
+        (driver, temp, root, tree)
+    }
+
+    fn in_project(dir: &Path, extra: Value) -> LaunchArgs {
+        let mut value = json!({"mode": "headless", "project_dir": dir});
+        let fields = extra.as_object().unwrap().clone();
+        value.as_object_mut().unwrap().extend(fields);
+        launch(value)
+    }
+
+    #[test]
+    fn a_bad_project_dir_fails_before_the_running_app_is_closed() {
+        let (mut driver, temp, _root, _tree) = worktree_fixture("", "");
+        hold(&mut driver, "/usr/bin/sleep", &["60"], Mode::Headless);
+        // An absolute folder holding a config but no worktree reaches the git checks.
+        let plain = temp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        std::fs::write(plain.join(CONFIG_FILE), "").unwrap();
+        for dir in [json!("wt"), json!(plain)] {
+            let error = driver
+                .launch(launch(
+                    json!({"mode": "headless", "replace": true, "project_dir": dir}),
+                ))
+                .unwrap_err();
+            assert_eq!(error.code(), ErrorCode::InvalidArgument, "{dir}");
+            assert_eq!(error.details["field"], json!("project_dir"));
+            assert!(driver.running.is_some(), "the running app was left alone");
+        }
+    }
+
+    #[test]
+    fn the_config_and_build_come_from_the_project_dir() {
+        let (mut driver, _temp, root, tree) = worktree_fixture(
+            "[headless]\nbuild = [\"sh\", \"-c\", \"echo root; exit 1\"]\nbinary = \"/usr/bin/true\"\n",
+            "[headless]\nbuild = [\"sh\", \"-c\", \"touch built; echo worktree; exit 1\"]\nbinary = \"/usr/bin/true\"\n",
+        );
+        let error = driver.launch(in_project(&tree, json!({}))).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::BuildFailed);
+        assert_eq!(error.details["log_tail"], json!("worktree"));
+        assert!(
+            tree.join("built").is_file(),
+            "the build ran in the worktree"
+        );
+        assert!(!root.join("built").exists());
+    }
+
+    #[test]
+    fn the_binary_is_resolved_against_the_project_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut driver, _temp, root, tree) =
+            worktree_fixture("", "[headless]\nbinary = \"app.sh\"\n");
+        for dir in [&root, &tree] {
+            let app = dir.join("app.sh");
+            std::fs::write(&app, "#!/bin/sh\n/usr/bin/touch \"$0.ran\"\n").unwrap();
+            std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let error = driver
+            .launch(in_project(&tree, json!({"build": false})))
+            .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::LaunchFailed);
+        assert!(
+            tree.join("app.sh.ran").is_file(),
+            "the worktree's binary ran"
+        );
+        assert!(!root.join("app.sh.ran").exists());
+    }
+
+    #[test]
+    fn keep_data_from_another_project_dir_is_refused_and_keeps_the_data() {
+        let (mut driver, _temp, root, tree) = worktree_fixture("", "");
+        let path = hold(&mut driver, "/usr/bin/true", &[], Mode::Headless);
+        driver.close(true).unwrap();
+        let other = driver
+            .launch(in_project(&tree, json!({"keep_data": true})))
+            .unwrap_err();
+        assert_eq!(other.code(), ErrorCode::InvalidArgument);
+        assert!(
+            other.error.message.contains(root.to_str().unwrap()),
+            "{}",
+            other.error.message
+        );
+        assert!(path.join("data").is_dir(), "the kept data is intact");
+        let same = driver
+            .launch(launch(json!({"mode": "headless", "keep_data": true})))
+            .unwrap_err();
+        assert_eq!(
+            same.code(),
+            ErrorCode::InvalidConfig,
+            "the root's data fits"
+        );
+        assert!(path.join("data").is_dir());
+        // With replace, the running app's project dir is the one compared.
+        hold_in(
+            &mut driver,
+            "/usr/bin/sleep",
+            &["60"],
+            Mode::Headless,
+            tree,
+            |_| {},
+        );
+        let replaced = driver
+            .launch(launch(
+                json!({"mode": "headless", "keep_data": true, "replace": true}),
+            ))
+            .unwrap_err();
+        assert_eq!(replaced.code(), ErrorCode::InvalidArgument);
+        assert!(
+            driver.running.is_some(),
+            "a refused launch leaves the app running"
+        );
+    }
+
+    /// A fake host answering picks and screenshots (writing a stand-in PNG), reporting each
+    /// request on `seen`; it stops at anything else.
+    fn answering_host(
+        seen: std::sync::mpsc::Sender<Request>,
+    ) -> impl FnOnce(std::os::unix::net::UnixStream) + Send + 'static {
+        use gpui_pilot_protocol::{BackendFrame, ClientFrame, read_line, write_line};
+        move |stream| {
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            while let Ok(Some(frame)) = read_line::<ClientFrame>(&mut reader) {
+                let reply = match frame.request.clone() {
+                    Request::PickFile { .. } => Reply::PickFile {
+                        answered: Answered::Open,
+                        prompt: None,
+                        settled: true,
+                    },
+                    Request::Screenshot { path, .. } => {
+                        std::fs::write(path, b"png").unwrap();
+                        Reply::Screenshot {
+                            w: 1,
+                            h: 1,
+                            scale: 1.0,
+                        }
+                    }
+                    _ => return,
+                };
+                seen.send(frame.request).unwrap();
+                let outcome = Outcome::Ok(reply);
+                write_line(&mut writer, &BackendFrame::new(frame.id, outcome)).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn relative_pick_and_save_paths_resolve_against_the_running_project_dir() {
+        let (mut driver, _temp, root, tree) = worktree_fixture("", "");
+        let (seen, requests) = std::sync::mpsc::channel();
+        let host = answering_host(seen);
+        let project = tree.clone();
+        hold_in(
+            &mut driver,
+            "/usr/bin/sleep",
+            &["60"],
+            Mode::Headless,
+            project,
+            host,
+        );
+        assert_eq!(driver.base(), tree);
+        let pick = Request::PickFile {
+            answer: PickAnswer::Paths(vec!["in.txt".into(), "/abs/b.txt".into()]),
+            settle_ms: 0,
+            timeout_ms: Some(0),
+        };
+        driver.pick_file(pick).unwrap();
+        let Request::PickFile {
+            answer: PickAnswer::Paths(paths),
+            ..
+        } = requests.recv().unwrap()
+        else {
+            panic!("not a pick");
+        };
+        assert_eq!(paths, [tree.join("in.txt"), PathBuf::from("/abs/b.txt")]);
+        let shot = ScreenshotArgs {
+            target: None,
+            save_to: Some("shot.png".into()),
+        };
+        let (result, _) = driver.screenshot(shot).unwrap();
+        assert_eq!(result["saved_to"], json!(tree.join("shot.png")));
+        assert!(tree.join("shot.png").is_file());
+        driver.close(false).unwrap();
+        assert_eq!(driver.base(), root, "a closed app no longer sets the base");
+    }
+
+    #[test]
+    fn a_crashed_app_no_longer_sets_the_base() {
+        let (mut driver, _temp, root, tree) = worktree_fixture("", "");
+        hold_in(
+            &mut driver,
+            "/usr/bin/true",
+            &[],
+            Mode::Headless,
+            tree,
+            |_| {},
+        );
+        let key = Request::Key {
+            keys: "escape".into(),
+            settle_ms: 0,
+        };
+        let crashed = driver.call(key, Duration::ZERO).unwrap_err();
+        assert_eq!(crashed.code(), ErrorCode::AppCrashed);
+        assert_eq!(driver.base(), root);
     }
 }

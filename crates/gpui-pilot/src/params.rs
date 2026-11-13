@@ -254,6 +254,11 @@ pub(crate) struct LaunchArgs {
     /// mode. With `replace`, the running app is closed keeping its data first.
     #[serde(default)]
     pub keep_data: bool,
+    /// Absolute path of a git worktree of the server's project to launch from instead of the
+    /// server's own folder: its gpui-pilot.toml, build, binary and binds are used, and relative
+    /// `pick_file` and `save_to` paths resolve against it until the app closes. A worktree
+    /// builds into its own target/, so its first build is cold.
+    pub project_dir: Option<String>,
 }
 
 /// Arguments of `close`.
@@ -795,11 +800,10 @@ impl ClipboardArgs {
 
 impl PickFileArgs {
     /// Exactly one of non-empty `paths` and `cancel: true`; the `Err` text is for the client.
-    pub fn request(self, root: &Path) -> Result<Request, String> {
+    /// Paths stay as given: the driver resolves relative ones against the project folder.
+    pub fn request(self) -> Result<Request, String> {
         let answer = match (self.paths.filter(|p| !p.is_empty()), self.cancel) {
-            (Some(paths), false) => {
-                PickAnswer::Paths(paths.iter().map(|p| absolute(root, p)).collect())
-            }
+            (Some(paths), false) => PickAnswer::Paths(paths),
             (None, true) => PickAnswer::Cancel,
             _ => return Err("pass exactly one of non-empty `paths` and `cancel: true`".into()),
         };
@@ -890,6 +894,7 @@ mod tests {
         assert_eq!(launch.network, None);
         assert_eq!(launch.settle_ms, 5000);
         assert_eq!(launch.refresh_hz, None);
+        assert_eq!(launch.project_dir, None);
         let tree: TreeArgs = args(json!({})).unwrap();
         assert_eq!(
             tree.request(),
@@ -1137,19 +1142,18 @@ mod tests {
 
     #[test]
     fn pick_file_takes_paths_or_cancel_but_not_both() {
-        let root = Path::new("/project");
         let pick: PickFileArgs = args(json!({"paths": ["notes.txt", "/abs/b.txt"]})).unwrap();
         assert_eq!(
-            pick.request(root).unwrap(),
+            pick.request().unwrap(),
             Request::PickFile {
-                answer: PickAnswer::Paths(vec!["/project/notes.txt".into(), "/abs/b.txt".into()]),
+                answer: PickAnswer::Paths(vec!["notes.txt".into(), "/abs/b.txt".into()]),
                 settle_ms: 2000,
                 timeout_ms: Some(10_000),
             }
         );
         let cancel: PickFileArgs = args(json!({"cancel": true})).unwrap();
         assert_eq!(
-            cancel.request(root).unwrap(),
+            cancel.request().unwrap(),
             Request::PickFile {
                 answer: PickAnswer::Cancel,
                 settle_ms: 2000,
@@ -1162,7 +1166,7 @@ mod tests {
             json!({"paths": ["a"], "cancel": true}),
         ] {
             let pick: PickFileArgs = args(bad.clone()).unwrap();
-            assert!(pick.request(root).is_err(), "{bad}");
+            assert!(pick.request().is_err(), "{bad}");
         }
     }
 
