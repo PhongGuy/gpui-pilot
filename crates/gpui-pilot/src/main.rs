@@ -11,6 +11,7 @@ mod driver;
 mod error;
 mod launch;
 mod params;
+mod project;
 mod redact;
 mod server;
 mod stage;
