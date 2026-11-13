@@ -52,6 +52,14 @@ pub(crate) fn resolve(root: &Path, candidate: &str) -> Result<PathBuf, ToolError
             "it is a worktree of another repository, not the server's project".into(),
         ));
     }
+    // Git keeps every worktree's git dir in the shared one's `worktrees`; one elsewhere was
+    // written by hand, links and all, so forging one takes write access to the repository.
+    let worktrees = std::fs::canonicalize(root_common.join("worktrees")).ok();
+    if worktrees.is_none() || git_dir.parent() != worktrees.as_deref() {
+        return Err(invalid(
+            "its git dir is not under the repository's worktrees".into(),
+        ));
+    }
     // A forged `.git` file may name a real worktree's git dir; that dir names only its own.
     let back = link(&git_dir, &git_dir.join("gitdir"));
     if back.as_deref() != Some(dot_git.as_path()) {
@@ -185,6 +193,10 @@ pub(crate) mod tests {
             ],
         );
         std::fs::write(tree.join(CONFIG_FILE), "").unwrap();
+        // Git before 2.48 ignores the option and writes an absolute link.
+        let link = std::fs::read_to_string(tree.join(".git")).unwrap();
+        let named = link.trim_end().strip_prefix("gitdir: ").unwrap();
+        assert!(Path::new(named).is_relative(), "{link}");
         assert_eq!(resolve(&root, tree.to_str().unwrap()).unwrap(), tree);
     }
 
@@ -267,6 +279,24 @@ pub(crate) mod tests {
         let link = std::fs::read_to_string(tree.join(".git")).unwrap();
         std::fs::write(forged.join(".git"), link).unwrap();
         refused(&root, &forged, "does not point back");
+    }
+
+    #[test]
+    fn a_forged_git_dir_outside_the_repositorys_worktrees_is_refused() {
+        // Every link is consistent, but the git dir was written outside `.git/worktrees`.
+        let (temp, root) = rooted();
+        let base = temp.path().canonicalize().unwrap();
+        let (forged, fake) = (base.join("x"), base.join("fake"));
+        std::fs::create_dir(&forged).unwrap();
+        std::fs::create_dir(&fake).unwrap();
+        std::fs::write(forged.join(CONFIG_FILE), "").unwrap();
+        let link = format!("gitdir: {}\n", fake.display());
+        std::fs::write(forged.join(".git"), link).unwrap();
+        let common = format!("{}\n", root.join(".git").display());
+        std::fs::write(fake.join("commondir"), common).unwrap();
+        let back = format!("{}\n", forged.join(".git").display());
+        std::fs::write(fake.join("gitdir"), back).unwrap();
+        refused(&root, &forged, "not under the repository's worktrees");
     }
 
     #[test]

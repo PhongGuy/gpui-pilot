@@ -369,7 +369,8 @@ impl Driver {
             .with("field", "refresh_hz"));
         }
         let env = app_env(&args.env)?;
-        // The folder that supplies config, build, binary and binds for this launch.
+        // The folder that supplies config, build, binary and binds for this launch. Its path is
+        // re-read at use; whoever could swap a parent folder in between could edit the config.
         let project = match &args.project_dir {
             Some(dir) => crate::project::resolve(&self.root, dir)?,
             None => self.root.clone(),
@@ -1549,16 +1550,22 @@ mod tests {
 
     #[test]
     fn a_bad_project_dir_fails_before_the_running_app_is_closed() {
-        let (mut driver, _temp, _root, _tree) = worktree_fixture("", "");
+        let (mut driver, temp, _root, _tree) = worktree_fixture("", "");
         hold(&mut driver, "/usr/bin/sleep", &["60"], Mode::Headless);
-        let error = driver
-            .launch(launch(
-                json!({"mode": "headless", "replace": true, "project_dir": "wt"}),
-            ))
-            .unwrap_err();
-        assert_eq!(error.code(), ErrorCode::InvalidArgument);
-        assert_eq!(error.details["field"], json!("project_dir"));
-        assert!(driver.running.is_some(), "the running app was left alone");
+        // An absolute folder holding a config but no worktree reaches the git checks.
+        let plain = temp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        std::fs::write(plain.join(CONFIG_FILE), "").unwrap();
+        for dir in [json!("wt"), json!(plain)] {
+            let error = driver
+                .launch(launch(
+                    json!({"mode": "headless", "replace": true, "project_dir": dir}),
+                ))
+                .unwrap_err();
+            assert_eq!(error.code(), ErrorCode::InvalidArgument, "{dir}");
+            assert_eq!(error.details["field"], json!("project_dir"));
+            assert!(driver.running.is_some(), "the running app was left alone");
+        }
     }
 
     #[test]
