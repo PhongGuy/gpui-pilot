@@ -70,7 +70,6 @@ jobs:
     timeout-minutes: 60
     continue-on-error: true
     env:
-      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
       GPUI_PILOT_SKIP_TIMING: "1"
     steps:
       - name: Free disk space
@@ -88,7 +87,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends $LINUX_BUILD_DEPS mesa-vulkan-drivers
-          test -f "$VK_ICD_FILENAMES"
+      # Force lavapipe: its ICD file name varies by mesa release, so find it rather than guess.
+      - name: Select the lavapipe ICD
+        run: |
+          ls /usr/share/vulkan/icd.d/
+          icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -n 1)
+          test -n "$icd"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
       # gpui-pilot's tests launch target/debug/pilot-demo, which they do not build themselves.
       - run: cargo build -p gpui-pilot -p pilot-demo --bins --locked
       - run: cargo test --workspace --locked --no-fail-fast
