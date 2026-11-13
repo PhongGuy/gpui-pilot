@@ -1,6 +1,5 @@
 //! `PilotServer`: the seventeen MCP tools, each run against the one `Driver` on tokio's blocking pool.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -51,8 +50,6 @@ impl Done {
 #[derive(Clone)]
 pub(crate) struct PilotServer {
     driver: Arc<Mutex<Driver>>,
-    /// The driver's root, kept here so `pick_file` can reject bad arguments without the lock.
-    root: Arc<PathBuf>,
     #[expect(dead_code, reason = "read through the macro-generated router")]
     tool_router: ToolRouter<Self>,
 }
@@ -60,7 +57,6 @@ pub(crate) struct PilotServer {
 impl PilotServer {
     pub fn new(driver: Driver) -> PilotServer {
         PilotServer {
-            root: Arc::new(driver.root().to_path_buf()),
             driver: Arc::new(Mutex::new(driver)),
             tool_router: Self::tool_router(),
         }
@@ -379,7 +375,8 @@ impl PilotServer {
         &self,
         Parameters(args): Parameters<PickFileArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        match args.request(&self.root) {
+        // Bad arguments are refused without the lock; the driver resolves relative paths.
+        match args.request() {
             Ok(request) => {
                 self.run("pick_file", move |driver| {
                     driver.pick_file(request).map(Done::value)
