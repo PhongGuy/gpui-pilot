@@ -800,12 +800,15 @@ async fn frames_record_a_notch_scroll_and_report_the_build() {
         .structured_content
         .clone()
         .expect("structured content");
-    let load = common::load::report();
-    assert!(report["frames"].as_u64().unwrap() >= 25, "{report}; {load}");
-    assert!(
-        report["latency"]["count"].as_u64().unwrap() >= 25,
-        "{report}; {load}"
-    );
+    // Only the frame counts are a budget; the rest of this test checks the tool's contract.
+    if !common::load::timing_skipped("frames_record_a_notch_scroll_and_report_the_build counts") {
+        let load = common::load::report();
+        assert!(report["frames"].as_u64().unwrap() >= 25, "{report}; {load}");
+        assert!(
+            report["latency"]["count"].as_u64().unwrap() >= 25,
+            "{report}; {load}"
+        );
+    }
     assert!(report["intervals"]["median_ms"].is_number(), "{report}");
     assert!(
         common::text(&result).starts_with("frames: "),

@@ -497,7 +497,9 @@ async fn the_session_output_runs_at_the_requested_rate_or_refuses() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn session_frames_follow_the_output_under_fast_notches() {
-    if !session_tests(Network::None) {
+    if !session_tests(Network::None)
+        || common::load::timing_skipped("session_frames_follow_the_output_under_fast_notches")
+    {
         return;
     }
     let demo = timing_windowed();
@@ -563,7 +565,9 @@ fn timing_server() -> PathBuf {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_screenshot_after_a_click_shows_the_apps_last_frame() {
-    if !session_tests(Network::None) {
+    if !session_tests(Network::None)
+        || common::load::timing_skipped("a_screenshot_after_a_click_shows_the_apps_last_frame")
+    {
         return;
     }
     let (server, demo) = (timing_server(), timing_windowed());

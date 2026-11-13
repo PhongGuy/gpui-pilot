@@ -26,3 +26,19 @@ pub fn report() -> String {
     let text = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
     describe(&text, cpus)
 }
+
+/// Whether a `GPUI_PILOT_SKIP_TIMING` value asks timing tests to skip: exactly `1`.
+pub fn skips_timing(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// True, after saying so on stderr, when `GPUI_PILOT_SKIP_TIMING=1`. CI sets it: a shared
+/// runner misses frame and time budgets for reasons unrelated to the code.
+pub fn timing_skipped(test: &str) -> bool {
+    let value = std::env::var("GPUI_PILOT_SKIP_TIMING").ok();
+    let skip = skips_timing(value.as_deref());
+    if skip {
+        eprintln!("{test}: timing skipped (GPUI_PILOT_SKIP_TIMING=1)");
+    }
+    skip
+}

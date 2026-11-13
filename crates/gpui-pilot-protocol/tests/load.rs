@@ -24,3 +24,11 @@ fn unreadable_load_is_named_not_guessed() {
     assert_eq!(load::describe("", 8), "load unreadable (8 cpus)");
     assert!(load::report().contains("cpus"));
 }
+
+#[test]
+fn only_a_skip_timing_value_of_one_skips() {
+    assert!(load::skips_timing(Some("1")));
+    for value in [None, Some(""), Some("0"), Some("true"), Some(" 1")] {
+        assert!(!load::skips_timing(value), "{value:?}");
+    }
+}
