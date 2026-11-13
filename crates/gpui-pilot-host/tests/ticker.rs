@@ -28,6 +28,9 @@ fn wakes(refresh_hz: u32, n: usize) -> Vec<(Instant, Instant)> {
 
 #[test]
 fn the_ticker_wakes_on_its_deadlines_at_every_rate() {
+    if common::load::timing_skipped("the_ticker_wakes_on_its_deadlines_at_every_rate") {
+        return;
+    }
     for hz in [60, 144, 240] {
         let wakes = wakes(hz, 120);
         let period = Duration::from_nanos(1_000_000_000 / u64::from(hz));

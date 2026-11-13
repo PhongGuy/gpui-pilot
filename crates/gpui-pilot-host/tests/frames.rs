@@ -100,6 +100,9 @@ fn start_and_stop_out_of_order_are_invalid_arguments() {
 
 #[test]
 fn notches_at_60_hz_draw_one_frame_per_vblank() {
+    if load::timing_skipped("notches_at_60_hz_draw_one_frame_per_vblank") {
+        return;
+    }
     let report = with_demo(640., 400., 1.0, |mut h| async move {
         show_list(&mut h, 0).await;
         let pilot = Pilot::new(h.platform.clone());

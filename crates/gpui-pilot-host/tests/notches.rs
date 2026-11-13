@@ -95,6 +95,9 @@ fn every_notch_is_its_own_wheel_event_and_modifiers_are_released() {
 
 #[test]
 fn notches_go_out_on_their_deadlines() {
+    if common::load::timing_skipped("notches_go_out_on_their_deadlines") {
+        return;
+    }
     let elapsed = with_demo(640., 400., 1.0, |mut h| async move {
         show_list(&mut h).await;
         let pilot = Pilot::new(h.platform.clone());

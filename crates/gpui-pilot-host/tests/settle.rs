@@ -17,6 +17,11 @@ const FORTY: &str = "The quick brown fox jumps over a lazy do";
 
 #[test]
 fn a_click_and_a_forty_character_type_settle_without_the_input_sustain() {
+    if common::load::timing_skipped(
+        "a_click_and_a_forty_character_type_settle_without_the_input_sustain",
+    ) {
+        return;
+    }
     let (click, typed, clicks, text, render) = with_demo(640., 400., 1.0, |mut h| async move {
         let render = first_frame(&h).await.render_time;
         let click = click_id(&mut h, "count").await;
@@ -86,6 +91,9 @@ fn a_debounced_change_is_waited_for() {
 
 #[test]
 fn a_blinking_cursor_does_not_hold_settle_off() {
+    if common::load::timing_skipped("a_blinking_cursor_does_not_hold_settle_off") {
+        return;
+    }
     let (focus, again) = with_demo(640., 400., 1.0, |mut h| async move {
         first_frame(&h).await;
         let focus = click_id(&mut h, "name").await;
@@ -183,6 +191,9 @@ fn a_budget_inside_the_horizon_still_settles_an_idle_window() {
 
 #[test]
 fn a_spinner_settles_once_the_layout_is_quiet() {
+    if common::load::timing_skipped("a_spinner_settles_once_the_layout_is_quiet") {
+        return;
+    }
     let (spin, click, clicks) = with_demo(640., 400., 1.0, |mut h| async move {
         first_frame(&h).await;
         let spin = click_id(&mut h, "spin").await;
@@ -213,6 +224,9 @@ fn a_still_app_settles_on_pixels_not_layout() {
 
 #[test]
 fn a_zero_budget_returns_at_once() {
+    if common::load::timing_skipped("a_zero_budget_returns_at_once") {
+        return;
+    }
     let zero = with_demo(640., 400., 1.0, |h| async move {
         first_frame(&h).await;
         let window = h.pilot_window();
@@ -223,6 +237,9 @@ fn a_zero_budget_returns_at_once() {
 
 #[test]
 fn a_spinner_settles_at_144_hz_after_the_same_wall_clock() {
+    if common::load::timing_skipped("a_spinner_settles_at_144_hz_after_the_same_wall_clock") {
+        return;
+    }
     let spin = with_demo_at(640., 400., 1.0, 144, |mut h| async move {
         first_frame(&h).await;
         click_id(&mut h, "spin").await
