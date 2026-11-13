@@ -1,0 +1,108 @@
+# A backstop for master: the local gate (see CLAUDE.md) stays mandatory before every merge,
+# and a green run here says nothing about session mode.
+#
+# Session tests (GPUI_PILOT_SESSION_TESTS=1) are deliberately absent: they need bwrap,
+# kwin_wayland and a GPU in a private KDE session, which hosted runners cannot provide.
+# They stay in the local gate; do not add them here.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Debug info and incremental state would overflow the runner's disk.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  LINUX_BUILD_DEPS: pkg-config libfontconfig-dev libfreetype-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libvulkan1 libegl1
+
+jobs:
+  gate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - name: Free disk space
+        # The hosted runner leaves about 14 GB free; these preinstalled toolchains are unused.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends $LINUX_BUILD_DEPS
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features --locked -- -Dwarnings
+      - run: cargo build -p gpui-pilot -p pilot-demo --bins --locked
+      - run: cargo build -p gpui-pilot -p pilot-demo --bins --profile timing --locked
+      # Only the tests that need no GPU. Everything that renders is left out: the host's
+      # integration tests that start a PilotPlatform through tests/common (all but buses),
+      # pilot-demo's socket test, and gpui-pilot's e2e and drive_script, which spawn
+      # pilot-demo. The session-gated binaries (gpui-pilot agent and session,
+      # gpui-pilot-session sandbox and session) would run nothing here, so they are left out too.
+      - name: Tests that need no GPU
+        run: |
+          cargo test --locked -p gpui-pilot-protocol --lib --test hover --test load --test stats --test wire
+          cargo test --locked -p gpui-pilot-host --lib --test buses
+          cargo test --locked -p gpui-pilot-session --lib
+          cargo test --locked -p gpui-pilot --bins --test stdio
+
+  # The whole suite on mesa's software Vulkan driver (lavapipe). Not required until it has
+  # proven itself; timing budgets are skipped, since a shared runner misses them anyway.
+  render:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    continue-on-error: true
+    env:
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+      GPUI_PILOT_SKIP_TIMING: "1"
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install build dependencies and lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends $LINUX_BUILD_DEPS mesa-vulkan-drivers
+          test -f "$VK_ICD_FILENAMES"
+      # gpui-pilot's tests launch target/debug/pilot-demo, which they do not build themselves.
+      - run: cargo build -p gpui-pilot -p pilot-demo --bins --locked
+      - run: cargo test --workspace --locked --no-fail-fast
+
+  # Audits every workflow for injection, credential and pinning mistakes.
+  zizmor:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          version: 1.32.0
+          inputs: .github/workflows
+          advanced-security: false
