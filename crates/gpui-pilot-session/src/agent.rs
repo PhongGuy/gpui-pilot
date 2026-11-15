@@ -1,5 +1,6 @@
 //! The session agent: a protocol 4 backend that runs the app inside the private session.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::BufReader;
@@ -37,28 +38,70 @@ const QUIET: Duration = Duration::from_millis(160);
 /// How long `pick_file` waits for a dialog when the request names no timeout.
 const PICK_TIMEOUT_MS: u64 = 10_000;
 
+/// The most of a quiet window's wall time the app's main thread may spend on the CPU: a frame
+/// in progress reads far above it, a cursor or ticker below; see
+/// docs/research/2026-11-15-session-settle-mid-frame.md.
+const BUSY_SHARE: f64 = 0.25;
+
+/// One settle capture's time and the app main thread's CPU time read right after it.
+struct Reading {
+    at: Instant,
+    cpu: Option<Duration>,
+}
+
 /// Settle's rule over timestamped capture hashes: settled once the latest hash has held for
-/// `quiet` since the first capture in its unbroken run.
+/// `quiet` since the first capture in its unbroken run, and the app's main thread used at most
+/// `BUSY_SHARE` of the time since the latest capture `quiet` or more before this one.
 struct Quiet {
     quiet: Duration,
     since: Option<(Instant, u64)>,
+    readings: VecDeque<Reading>,
 }
 
 impl Quiet {
     fn new(quiet: Duration) -> Self {
-        Self { quiet, since: None }
+        Self {
+            quiet,
+            since: None,
+            readings: VecDeque::new(),
+        }
     }
 
-    /// Records the capture taken at `at`; true when `hash` equals the current run's and the run
-    /// began at least `quiet` before `at`. A different hash starts a new run.
-    fn observe(&mut self, at: Instant, hash: u64) -> bool {
-        match self.since {
+    /// Records the capture taken at `at` with its CPU reading; true when `hash` equals the
+    /// current run's, the run began at least `quiet` before `at`, and the CPU share passes. A
+    /// different hash starts a new run; a missing reading skips the CPU rule.
+    fn observe(&mut self, at: Instant, hash: u64, cpu: Option<Duration>) -> bool {
+        let pixels_quiet = match self.since {
             Some((start, held)) if held == hash => at.duration_since(start) >= self.quiet,
             _ => {
                 self.since = Some((at, hash));
                 false
             }
+        };
+        // The base slides with every capture, independent of the pixel run, so a long unchanged
+        // run cannot dilute a late busy frame; readings older than it are no longer needed.
+        let base = self
+            .readings
+            .iter()
+            .rposition(|r| at.duration_since(r.at) >= self.quiet);
+        if let Some(index) = base {
+            self.readings.drain(..index);
         }
+        let cpu_quiet = match (base.and(self.readings.front()), cpu) {
+            (
+                Some(Reading {
+                    at: base_at,
+                    cpu: Some(base_cpu),
+                }),
+                Some(cpu),
+            ) => {
+                let wall = at.duration_since(*base_at);
+                cpu.saturating_sub(*base_cpu) <= wall.mul_f64(BUSY_SHARE)
+            }
+            _ => true,
+        };
+        self.readings.push_back(Reading { at, cpu });
+        pixels_quiet && cpu_quiet
     }
 }
 
@@ -320,6 +363,30 @@ fn left_behind(session: u32, stats: impl IntoIterator<Item = String>) -> bool {
     !session_members(session, stats).is_empty()
 }
 
+/// utime + stime in clock ticks from one `/proc/<pid>/task/<tid>/stat` line, read after the last
+/// `)` as `session_members` does; None when the line is short or a field is not a number.
+fn stat_cpu_ticks(line: &str) -> Option<u64> {
+    let (_, tail) = line.rsplit_once(')')?;
+    let mut fields = tail.split_whitespace().skip(11);
+    let utime: u64 = fields.next()?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+    Some(utime + stime)
+}
+
+/// The CPU time the main thread of process `pid` (tid == pid, where GPUI lays out and draws)
+/// has used, or None if its stat file cannot be read or parsed.
+fn main_thread_cpu(pid: u32) -> Option<Duration> {
+    let line = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/stat")).ok()?;
+    let ticks = stat_cpu_ticks(&line)?;
+    let per_second = rustix::param::clock_ticks_per_second();
+    if per_second == 0 {
+        return None;
+    }
+    Some(Duration::from_nanos(
+        ticks.saturating_mul(1_000_000_000) / per_second,
+    ))
+}
+
 /// Every readable `/proc/<pid>/stat` line in the sandbox's pid namespace.
 fn sandbox_stats() -> Vec<String> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -360,6 +427,8 @@ struct Agent {
     client: Rect,
     /// The output's refresh read at bring-up, which `frames` reports against.
     refresh_mhz: u32,
+    /// Set once settle has logged that the app's CPU time is unreadable, so it logs only once.
+    cpu_unreadable_logged: bool,
 }
 
 impl Agent {
@@ -394,6 +463,7 @@ impl Agent {
             app_session: pid,
             client: Rect::new(0., 0., 0., 0.),
             refresh_mhz,
+            cpu_unreadable_logged: false,
         };
         agent.session.wait_window(pid, BRING_UP)?;
         agent.adopt(pid, None)?;
@@ -526,8 +596,8 @@ impl Agent {
         }
     }
 
-    /// Captures the client area every 50 ms until the pixels hold unchanged for `QUIET`, within
-    /// `budget`. A zero budget answers false without capturing.
+    /// Captures the client area every 50 ms until the pixels hold unchanged for `QUIET` and the
+    /// app's main thread is mostly idle over it (`Quiet`), within `budget`. A zero budget answers false without capturing.
     fn settle(&mut self, budget: Duration) -> bool {
         if budget.is_zero() {
             return false;
@@ -541,7 +611,17 @@ impl Agent {
                     let at = Instant::now();
                     let mut hasher = DefaultHasher::new();
                     capture.crop(&self.client).rgba.hash(&mut hasher);
-                    if quiet.observe(at, hasher.finish()) {
+                    // Read right after the capture, so a frame still drawing shows as CPU time
+                    // on the main thread before it shows as pixels.
+                    let cpu = main_thread_cpu(self.app.pid());
+                    if cpu.is_none() && !self.cpu_unreadable_logged {
+                        self.cpu_unreadable_logged = true;
+                        eprintln!(
+                            "gpui-pilot session-agent: cannot read the app's CPU time; settle \
+                             uses pixels only"
+                        );
+                    }
+                    if quiet.observe(at, hasher.finish(), cpu) {
                         return true;
                     }
                 }
@@ -1244,6 +1324,26 @@ mod tests {
         assert!(App::follow(pid).is_err());
     }
 
+    #[test]
+    fn stat_cpu_ticks_reads_utime_and_stime_after_the_last_paren() {
+        let line =
+            "4242 (gpui (main) x) S 1 4242 4242 0 -1 4194304 100 0 0 0 37 5 0 0 20 0 12 0 100 0 0";
+        assert_eq!(stat_cpu_ticks(line), Some(42));
+    }
+
+    #[test]
+    fn stat_cpu_ticks_refuses_a_short_or_garbled_line() {
+        assert_eq!(stat_cpu_ticks("nonsense"), None);
+        assert_eq!(stat_cpu_ticks("1 (a) S 1 2 3"), None);
+        assert_eq!(stat_cpu_ticks("1 (a) S 1 2 3 0 -1 0 0 0 0 0 x 5"), None);
+    }
+
+    #[test]
+    fn main_thread_cpu_reads_this_process_and_not_a_missing_one() {
+        assert!(main_thread_cpu(std::process::id()).is_some());
+        assert_eq!(main_thread_cpu(u32::MAX), None);
+    }
+
     fn at(t0: Instant, ms: u64) -> Instant {
         t0 + Duration::from_millis(ms)
     }
@@ -1253,13 +1353,13 @@ mod tests {
         let t0 = Instant::now();
         let mut quiet = Quiet::new(Duration::from_millis(160));
         // A hover frame, then the content 120 ms later: an equal pair 60 ms apart is not enough.
-        assert!(!quiet.observe(at(t0, 0), 1));
-        assert!(!quiet.observe(at(t0, 60), 2));
-        assert!(!quiet.observe(at(t0, 120), 2));
-        assert!(!quiet.observe(at(t0, 180), 3));
-        assert!(!quiet.observe(at(t0, 240), 3));
-        assert!(!quiet.observe(at(t0, 300), 3));
-        assert!(quiet.observe(at(t0, 340), 3));
+        assert!(!quiet.observe(at(t0, 0), 1, None));
+        assert!(!quiet.observe(at(t0, 60), 2, None));
+        assert!(!quiet.observe(at(t0, 120), 2, None));
+        assert!(!quiet.observe(at(t0, 180), 3, None));
+        assert!(!quiet.observe(at(t0, 240), 3, None));
+        assert!(!quiet.observe(at(t0, 300), 3, None));
+        assert!(quiet.observe(at(t0, 340), 3, None));
     }
 
     #[test]
@@ -1267,19 +1367,91 @@ mod tests {
         // A dev-built agent captures about every 400 ms; two equal captures already span it.
         let t0 = Instant::now();
         let mut quiet = Quiet::new(Duration::from_millis(160));
-        assert!(!quiet.observe(at(t0, 0), 7));
-        assert!(quiet.observe(at(t0, 400), 7));
+        assert!(!quiet.observe(at(t0, 0), 7, None));
+        assert!(quiet.observe(at(t0, 400), 7, None));
     }
 
     #[test]
     fn a_change_restarts_the_window() {
         let t0 = Instant::now();
         let mut quiet = Quiet::new(Duration::from_millis(160));
-        assert!(!quiet.observe(at(t0, 0), 1));
-        assert!(!quiet.observe(at(t0, 150), 2));
-        assert!(!quiet.observe(at(t0, 200), 1));
-        assert!(!quiet.observe(at(t0, 300), 1));
-        assert!(quiet.observe(at(t0, 360), 1));
+        assert!(!quiet.observe(at(t0, 0), 1, None));
+        assert!(!quiet.observe(at(t0, 150), 2, None));
+        assert!(!quiet.observe(at(t0, 200), 1, None));
+        assert!(!quiet.observe(at(t0, 300), 1, None));
+        assert!(quiet.observe(at(t0, 360), 1, None));
+    }
+
+    fn cpu_ms(n: u64) -> Option<Duration> {
+        Some(Duration::from_millis(n))
+    }
+
+    #[test]
+    fn a_busy_main_thread_holds_settle_until_it_idles() {
+        // Pixels hold from 0; the main thread draws (40 ms per 60 ms) until 180, then idles.
+        let t0 = Instant::now();
+        let mut quiet = Quiet::new(Duration::from_millis(160));
+        assert!(!quiet.observe(at(t0, 0), 1, cpu_ms(0)));
+        assert!(!quiet.observe(at(t0, 60), 1, cpu_ms(40)));
+        assert!(!quiet.observe(at(t0, 120), 1, cpu_ms(80)));
+        assert!(!quiet.observe(at(t0, 180), 1, cpu_ms(120)));
+        assert!(!quiet.observe(at(t0, 240), 1, cpu_ms(120)));
+        assert!(quiet.observe(at(t0, 300), 1, cpu_ms(120)));
+    }
+
+    #[test]
+    fn light_main_thread_work_still_settles() {
+        // A ticker's 10 ms per 60 ms is about 17%, under the 25% share.
+        let t0 = Instant::now();
+        let mut quiet = Quiet::new(Duration::from_millis(160));
+        assert!(!quiet.observe(at(t0, 0), 1, cpu_ms(0)));
+        assert!(!quiet.observe(at(t0, 60), 1, cpu_ms(10)));
+        assert!(!quiet.observe(at(t0, 120), 1, cpu_ms(20)));
+        assert!(quiet.observe(at(t0, 180), 1, cpu_ms(30)));
+    }
+
+    #[test]
+    fn the_cpu_window_slides_with_the_captures() {
+        // A long unchanged run, then a busy burst: the share is taken over the last 160 ms,
+        // not since the run began (120 ms over 600 would read 20%).
+        let t0 = Instant::now();
+        let mut quiet = Quiet::new(Duration::from_millis(160));
+        for n in 0..=8 {
+            quiet.observe(at(t0, n * 60), 1, cpu_ms(0));
+        }
+        assert!(!quiet.observe(at(t0, 540), 1, cpu_ms(60)));
+        assert!(!quiet.observe(at(t0, 600), 1, cpu_ms(120)));
+    }
+
+    #[test]
+    fn a_missing_reading_falls_back_to_pixels() {
+        let t0 = Instant::now();
+        let mut quiet = Quiet::new(Duration::from_millis(160));
+        assert!(!quiet.observe(at(t0, 0), 1, None));
+        assert!(!quiet.observe(at(t0, 60), 1, cpu_ms(100)));
+        assert!(quiet.observe(at(t0, 180), 1, cpu_ms(200)));
+        let mut quiet = Quiet::new(Duration::from_millis(160));
+        assert!(!quiet.observe(at(t0, 0), 1, cpu_ms(0)));
+        assert!(quiet.observe(at(t0, 180), 1, None));
+    }
+
+    #[test]
+    fn cpu_going_backwards_counts_as_idle() {
+        // A restart swaps in a new pid whose main thread has used less CPU than the old one.
+        let t0 = Instant::now();
+        let mut quiet = Quiet::new(Duration::from_millis(160));
+        assert!(!quiet.observe(at(t0, 0), 1, cpu_ms(5000)));
+        assert!(quiet.observe(at(t0, 180), 1, cpu_ms(20)));
+    }
+
+    #[test]
+    fn a_pixel_change_still_restarts_the_window_when_idle() {
+        let t0 = Instant::now();
+        let mut quiet = Quiet::new(Duration::from_millis(160));
+        assert!(!quiet.observe(at(t0, 0), 1, cpu_ms(0)));
+        assert!(!quiet.observe(at(t0, 150), 2, cpu_ms(0)));
+        assert!(!quiet.observe(at(t0, 300), 2, cpu_ms(0)));
+        assert!(quiet.observe(at(t0, 310), 2, cpu_ms(0)));
     }
 
     fn os(v: &[&str]) -> Vec<OsString> {
