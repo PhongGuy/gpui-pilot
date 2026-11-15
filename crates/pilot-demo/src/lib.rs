@@ -107,6 +107,12 @@ pub struct DemoView {
     pub late_paint: Option<Duration>,
     pub repaints: u32,
     pub repainting: bool,
+    /// On `--ticker-ms <n>`, a `ticker` click shows `Running N.N s` refreshed every 100 ms
+    /// for `n` ms, then `Done`, an app that stops repainting once its work ends.
+    pub ticker: Option<Duration>,
+    pub ticker_label: String,
+    /// On `--ticker-heavy <n>`, the `Done` frame also draws `n` text cells, a result grid.
+    pub ticker_heavy: usize,
     /// Line wheel events the list has seen, and the sum of their `y` in lines.
     pub wheels: u32,
     pub wheel_lines: f32,
@@ -236,6 +242,9 @@ impl DemoView {
             late_paint: None,
             repaints: 0,
             repainting: false,
+            ticker: None,
+            ticker_label: "Ticker".into(),
+            ticker_heavy: 0,
             wheels: 0,
             wheel_lines: 0.,
             list_scroll: UniformListScrollHandle::new(),
@@ -269,7 +278,8 @@ impl DemoView {
     }
 
     /// Applies the `--list`, `--popover`, `--context-menu` and `--secret` flags and the `--dir <path>`,
-    /// `--fetch <url>`, `--render-delay-ms <n>` and `--late-paint-ms <n>` pairs from `args`;
+    /// `--fetch <url>`, `--render-delay-ms <n>`, `--late-paint-ms <n>`, `--ticker-ms <n>` and
+    /// `--ticker-heavy <n>` pairs from `args`;
     /// unknown args are ignored.
     pub fn configure(&mut self, args: &[String]) {
         if args.iter().any(|arg| arg == "--list") {
@@ -308,6 +318,10 @@ impl DemoView {
                 }
                 "--late-paint-ms" => {
                     self.late_paint = pair[1].parse().ok().map(Duration::from_millis);
+                }
+                "--ticker-heavy" => self.ticker_heavy = pair[1].parse().unwrap_or(0),
+                "--ticker-ms" => {
+                    self.ticker = pair[1].parse().ok().map(Duration::from_millis);
                 }
                 _ => {}
             }
@@ -479,6 +493,40 @@ impl DemoView {
                 cx.notify();
             })
             .ok();
+        })
+        .detach();
+    }
+
+    /// Relabels `ticker` with the elapsed time every 100 ms until `ticker` has passed, then
+    /// shows `Done` and stops notifying.
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        let Some(total) = self.ticker else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        self.ticker_label = "Running 0.0 s".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let elapsed = started.elapsed();
+                let done = elapsed >= total;
+                let alive = this
+                    .update(cx, |view, cx| {
+                        view.ticker_label = if done {
+                            "Done".into()
+                        } else {
+                            format!("Running {:.1} s", elapsed.as_secs_f32())
+                        };
+                        cx.notify();
+                    })
+                    .is_ok();
+                if done || !alive {
+                    break;
+                }
+            }
         })
         .detach();
     }
@@ -1074,6 +1122,31 @@ impl Render for DemoView {
                             format!("Repaint {}", self.repaints)
                         })
                         .on_click(cx.listener(|view: &mut Self, _, _, cx| view.repaint(cx))),
+                )
+            })
+            // Only with `--ticker-ms`, so other trees and screenshots stay unchanged.
+            .when(self.ticker.is_some(), |this| {
+                this.child(
+                    A11y(Button::new("ticker"))
+                        .accessibility_id("ticker")
+                        .0
+                        .label(self.ticker_label.clone())
+                        .on_click(cx.listener(|view: &mut Self, _, _, cx| view.tick(cx))),
+                )
+                .when(
+                    self.ticker_label == "Done" && self.ticker_heavy > 0,
+                    |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .w(px(1200.))
+                                .text_size(px(6.))
+                                .children((0..self.ticker_heavy).map(|i| {
+                                    div().child(format!("{:x}", i.wrapping_mul(2654435761)))
+                                })),
+                        )
+                    },
                 )
             })
             // Last, so the fixtures above keep their positions.
