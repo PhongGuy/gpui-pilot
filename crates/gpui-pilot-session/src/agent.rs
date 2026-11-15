@@ -320,6 +320,30 @@ fn left_behind(session: u32, stats: impl IntoIterator<Item = String>) -> bool {
     !session_members(session, stats).is_empty()
 }
 
+/// utime + stime in clock ticks from one `/proc/<pid>/task/<tid>/stat` line, read after the last
+/// `)` as `session_members` does; None when the line is short or a field is not a number.
+fn stat_cpu_ticks(line: &str) -> Option<u64> {
+    let (_, tail) = line.rsplit_once(')')?;
+    let mut fields = tail.split_whitespace().skip(11);
+    let utime: u64 = fields.next()?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+    Some(utime + stime)
+}
+
+/// The CPU time the main thread of process `pid` (tid == pid, where GPUI lays out and draws)
+/// has used, or None if its stat file cannot be read or parsed.
+fn main_thread_cpu(pid: u32) -> Option<Duration> {
+    let line = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/stat")).ok()?;
+    let ticks = stat_cpu_ticks(&line)?;
+    let per_second = rustix::param::clock_ticks_per_second();
+    if per_second == 0 {
+        return None;
+    }
+    Some(Duration::from_nanos(
+        ticks.saturating_mul(1_000_000_000) / per_second,
+    ))
+}
+
 /// Every readable `/proc/<pid>/stat` line in the sandbox's pid namespace.
 fn sandbox_stats() -> Vec<String> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -1242,6 +1266,26 @@ mod tests {
         let pid = child.id();
         child.wait().unwrap();
         assert!(App::follow(pid).is_err());
+    }
+
+    #[test]
+    fn stat_cpu_ticks_reads_utime_and_stime_after_the_last_paren() {
+        let line =
+            "4242 (gpui (main) x) S 1 4242 4242 0 -1 4194304 100 0 0 0 37 5 0 0 20 0 12 0 100 0 0";
+        assert_eq!(stat_cpu_ticks(line), Some(42));
+    }
+
+    #[test]
+    fn stat_cpu_ticks_refuses_a_short_or_garbled_line() {
+        assert_eq!(stat_cpu_ticks("nonsense"), None);
+        assert_eq!(stat_cpu_ticks("1 (a) S 1 2 3"), None);
+        assert_eq!(stat_cpu_ticks("1 (a) S 1 2 3 0 -1 0 0 0 0 0 x 5"), None);
+    }
+
+    #[test]
+    fn main_thread_cpu_reads_this_process_and_not_a_missing_one() {
+        assert!(main_thread_cpu(std::process::id()).is_some());
+        assert_eq!(main_thread_cpu(u32::MAX), None);
     }
 
     fn at(t0: Instant, ms: u64) -> Instant {
