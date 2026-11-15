@@ -427,6 +427,8 @@ struct Agent {
     client: Rect,
     /// The output's refresh read at bring-up, which `frames` reports against.
     refresh_mhz: u32,
+    /// Set once settle has logged that the app's CPU time is unreadable, so it logs only once.
+    cpu_unreadable_logged: bool,
 }
 
 impl Agent {
@@ -461,6 +463,7 @@ impl Agent {
             app_session: pid,
             client: Rect::new(0., 0., 0., 0.),
             refresh_mhz,
+            cpu_unreadable_logged: false,
         };
         agent.session.wait_window(pid, BRING_UP)?;
         agent.adopt(pid, None)?;
@@ -593,8 +596,8 @@ impl Agent {
         }
     }
 
-    /// Captures the client area every 50 ms until the pixels hold unchanged for `QUIET`, within
-    /// `budget`. A zero budget answers false without capturing.
+    /// Captures the client area every 50 ms until the pixels hold unchanged for `QUIET` and the
+    /// app's main thread is mostly idle over it (`Quiet`), within `budget`. A zero budget answers false without capturing.
     fn settle(&mut self, budget: Duration) -> bool {
         if budget.is_zero() {
             return false;
@@ -608,7 +611,17 @@ impl Agent {
                     let at = Instant::now();
                     let mut hasher = DefaultHasher::new();
                     capture.crop(&self.client).rgba.hash(&mut hasher);
-                    if quiet.observe(at, hasher.finish(), None) {
+                    // Read right after the capture, so a frame still drawing shows as CPU time
+                    // on the main thread before it shows as pixels.
+                    let cpu = main_thread_cpu(self.app.pid());
+                    if cpu.is_none() && !self.cpu_unreadable_logged {
+                        self.cpu_unreadable_logged = true;
+                        eprintln!(
+                            "gpui-pilot session-agent: cannot read the app's CPU time; settle \
+                             uses pixels only"
+                        );
+                    }
+                    if quiet.observe(at, hasher.finish(), cpu) {
                         return true;
                     }
                 }

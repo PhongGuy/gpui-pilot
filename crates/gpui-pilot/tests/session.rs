@@ -599,3 +599,42 @@ async fn a_screenshot_after_a_click_shows_the_apps_last_frame() {
     }
     pilot.ok("close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_screenshot_after_a_settled_tree_shows_a_long_final_frame() {
+    if !session_tests(Network::None)
+        || common::load::timing_skipped(
+            "a_screenshot_after_a_settled_tree_shows_a_long_final_frame",
+        )
+    {
+        return;
+    }
+    let (server, demo) = (timing_server(), timing_windowed());
+    require_timing_bins(&[&server, &demo]);
+    let config = format!("[session]\nbinary = \"{}\"\n", demo.display());
+    let pilot = Pilot::start_with(&server, Some(&config)).await;
+    pilot
+        .ok(
+            "launch",
+            json!({"mode": "session", "width": 1280, "height": 800, "scale": 1.0, "build": false,
+                   "args": ["--ticker-ms", "2000", "--ticker-heavy", "20000"]}),
+        )
+        .await;
+    // The label ticks faster than the quiet window until the Done frame, which takes about
+    // 480 ms to draw: settle must wait for that frame, not the pixel gap it leaves.
+    for n in 1..=3 {
+        pilot
+            .ok("click", json!({"target": {"id": ["ticker"]}}))
+            .await;
+        pilot.ok("tree", json!({"settle_ms": 4000})).await;
+        let shot = png(&pilot.result("screenshot", json!({})).await);
+        pilot.ok("wait", json!({"ms": 3000})).await;
+        let truth = png(&pilot.result("screenshot", json!({})).await);
+        assert!(
+            shot == truth,
+            "run {n}: the screenshot after a settled tree showed a frame before the app's last; {}",
+            common::load::report()
+        );
+    }
+    pilot.ok("close", json!({})).await;
+}
