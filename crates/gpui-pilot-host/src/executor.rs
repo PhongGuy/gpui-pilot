@@ -566,6 +566,8 @@ impl Pilot {
             prompt: self.platform.pending_prompt().map(prompt_info),
             pick_queued: self.platform.has_queued_answer(),
             dialog: window.pending_dialog().map(dialog_info),
+            settled: None,
+            settle_elapsed_ms: None,
         })
     }
 

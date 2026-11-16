@@ -1092,6 +1092,8 @@ impl Agent {
             prompt: None,
             pick_queued: false,
             dialog: None,
+            settled: None,
+            settle_elapsed_ms: None,
         })
     }
 
