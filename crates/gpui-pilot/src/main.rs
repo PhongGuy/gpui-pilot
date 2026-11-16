@@ -35,9 +35,13 @@ fn main() -> ExitCode {
             }
         },
         Some("session-agent") => gpui_pilot_session::agent::run(std::env::args_os().skip(2)),
+        Some("--version" | "-V") => {
+            println!("gpui-pilot {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
         Some(other) => {
             eprintln!(
-                "gpui-pilot: unknown command `{other}`; usage: gpui-pilot [mcp] | gpui-pilot session-agent [--env NAME=VALUE]... -- PROGRAM [ARG]..."
+                "gpui-pilot: unknown command `{other}`; usage: gpui-pilot [mcp] | gpui-pilot --version | gpui-pilot session-agent [--env NAME=VALUE]... -- PROGRAM [ARG]..."
             );
             ExitCode::from(2)
         }
