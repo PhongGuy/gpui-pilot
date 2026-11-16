@@ -528,3 +528,40 @@ fn a11y_rows_are_visible_in_a_window_placed_off_the_corner() {
     assert_eq!(rows.len(), 3, "{rows:?}");
     assert!(rows.iter().all(|(_, visible)| *visible), "{rows:?}");
 }
+
+fn tree_settle(outcome: Outcome) -> (Option<bool>, Option<u64>) {
+    match outcome {
+        Outcome::Ok(Reply::Tree {
+            settled,
+            settle_elapsed_ms,
+            ..
+        }) => (settled, settle_elapsed_ms),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn tree_reports_its_settle_and_a_zero_budget_does_not_settle() {
+    let (waited, skipped) = with_demo(640., 400., 1.0, |mut h| async move {
+        first_frame(&h).await;
+        let pilot = Pilot::new(h.platform.clone());
+        let settling = Request::Tree {
+            within: None,
+            wait_for: None,
+            timeout_ms: 0,
+            settle_ms: 2000,
+        };
+        let waited = tree_settle(pilot.handle(settling, &mut h.cx).await);
+        let zero = Request::Tree {
+            within: None,
+            wait_for: None,
+            timeout_ms: 0,
+            settle_ms: 0,
+        };
+        let skipped = tree_settle(pilot.handle(zero, &mut h.cx).await);
+        (waited, skipped)
+    });
+    assert_eq!(waited.0, Some(true), "{waited:?}");
+    assert!(waited.1.is_some_and(|ms| ms <= 2000), "{waited:?}");
+    assert_eq!(skipped, (Some(false), Some(0)));
+}

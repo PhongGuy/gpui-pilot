@@ -265,6 +265,17 @@ mod tests {
     }
 
     #[test]
+    fn shortening_keeps_the_settle_fields() {
+        let mut reply = rows(4000);
+        reply["settled"] = json!(true);
+        reply["settle_elapsed_ms"] = json!(12);
+        shorten_tree(&mut reply, MAX);
+        assert!(reply.get("shortened").is_some());
+        assert_eq!(reply["settled"], json!(true));
+        assert_eq!(reply["settle_elapsed_ms"], json!(12));
+    }
+
+    #[test]
     fn a_tree_without_runs_stays_whole_and_says_it_is_still_over() {
         let nodes: Vec<Value> = (0..180)
             .map(|i| {

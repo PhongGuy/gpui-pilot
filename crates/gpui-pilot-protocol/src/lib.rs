@@ -589,6 +589,12 @@ pub enum Reply {
         /// The GPUI prompt the app is waiting on, if any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dialog: Option<DialogInfo>,
+        /// Whether the settle before listing reached quiet; hosts before this field omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settled: Option<bool>,
+        /// How long that settle took, in whole milliseconds; omitted with `settled`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settle_elapsed_ms: Option<u64>,
     },
     Click {
         clicked: Node,

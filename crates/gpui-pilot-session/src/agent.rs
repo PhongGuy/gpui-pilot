@@ -599,10 +599,16 @@ impl Agent {
     /// Captures the client area every 50 ms until the pixels hold unchanged for `QUIET` and the
     /// app's main thread is mostly idle over it (`Quiet`), within `budget`. A zero budget answers false without capturing.
     fn settle(&mut self, budget: Duration) -> bool {
+        self.settle_timed(budget).0
+    }
+
+    /// As `settle`, also returning how long the wait took; a zero budget is `(false, ZERO)`.
+    fn settle_timed(&mut self, budget: Duration) -> (bool, Duration) {
         if budget.is_zero() {
-            return false;
+            return (false, Duration::ZERO);
         }
-        let deadline = Instant::now() + budget;
+        let started = Instant::now();
+        let deadline = started + budget;
         let mut quiet = Quiet::new(QUIET);
         loop {
             match self.session.capture() {
@@ -622,13 +628,13 @@ impl Agent {
                         );
                     }
                     if quiet.observe(at, hasher.finish(), cpu) {
-                        return true;
+                        return (true, started.elapsed());
                     }
                 }
                 Err(error) => eprintln!("gpui-pilot session-agent: settle capture: {error}"),
             }
             if Instant::now() >= deadline {
-                return false;
+                return (false, started.elapsed());
             }
             std::thread::sleep(TICK);
         }
@@ -1056,7 +1062,8 @@ impl Agent {
                 "`within` takes an element target, not a point",
             )));
         }
-        self.settle(Duration::from_millis(settle_ms));
+        let (settled, elapsed) = self.settle_timed(Duration::from_millis(settle_ms));
+        let settle_elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let nodes = loop {
             let nodes = self.session.tree(self.app.pid())?;
@@ -1086,12 +1093,14 @@ impl Agent {
             }
             None => nodes,
         };
-        // Session dialog state is not wired into `tree` yet; it reports neither field.
+        // Session dialog state is not wired into `tree` yet; it reports no prompt or dialog.
         Ok(Reply::Tree {
             nodes,
             prompt: None,
             pick_queued: false,
             dialog: None,
+            settled: Some(settled),
+            settle_elapsed_ms: Some(settle_elapsed_ms),
         })
     }
 

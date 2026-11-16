@@ -156,6 +156,21 @@ async fn drives_the_windowed_demo_in_a_private_session() {
             .any(|n| n["role"] == json!("Button") && n["name"] == json!("hello")),
         "launch.env reached the app: {tree}"
     );
+    let quiet = pilot.result("tree", json!({"settle_ms": 3000})).await;
+    let value = quiet
+        .structured_content
+        .clone()
+        .expect("structured content");
+    assert_eq!(value["settled"], json!(true), "{value}");
+    assert!(
+        value["settle_elapsed_ms"].as_u64().unwrap() >= 160,
+        "{value}"
+    );
+    let line = common::text(&quiet);
+    assert!(
+        line.lines().next().unwrap().contains("; settled in "),
+        "{line}"
+    );
     let clicked = pilot
         .ok("click", json!({"target": {"id": ["count"]}}))
         .await;

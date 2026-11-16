@@ -313,6 +313,14 @@ fn tree(value: &Value) -> String {
             dialog_text(dialog)
         ));
     }
+    // Only a quiet settle has a time worth naming; an older host reports neither field.
+    match (
+        value["settled"].as_bool(),
+        value["settle_elapsed_ms"].as_u64(),
+    ) {
+        (Some(true), Some(ms)) => header.push_str(&format!("; settled in {ms} ms")),
+        _ => header.push_str(settle_tail(value)),
+    }
     let mut lines = vec![header];
     if value.get("shortened").is_some() {
         // Collapsed runs first, then nodes while the text stays short; the structured content
@@ -425,6 +433,34 @@ mod tests {
             node["name"] = json!(name);
         }
         node
+    }
+
+    #[test]
+    fn a_tree_header_ends_with_its_settle_when_the_host_reports_one() {
+        let settled = json!({"nodes": [], "settled": true, "settle_elapsed_ms": 37});
+        assert_eq!(summary("tree", &settled), "tree: 0 nodes; settled in 37 ms");
+        let ran_out = json!({"nodes": [], "settled": false, "settle_elapsed_ms": 1000});
+        assert_eq!(
+            summary("tree", &ran_out),
+            "tree: 0 nodes; not settled (settle_ms ran out)"
+        );
+        let untimed = json!({"nodes": [], "settled": true});
+        assert_eq!(summary("tree", &untimed), "tree: 0 nodes; settled");
+        let waiting = json!({"nodes": [node("count", Some("Button"), Some("Count"))],
+            "pick_queued": true, "settled": true, "settle_elapsed_ms": 5});
+        assert_eq!(
+            summary("tree", &waiting),
+            [
+                "tree: 1 nodes; a pick_file answer is queued for the next dialog; settled in 5 ms",
+                r#"- ["count"] Button "Count" at 16,50.5 80x32"#,
+            ]
+            .join("\n")
+        );
+        assert_eq!(
+            summary("tree", &json!({"nodes": []})),
+            "tree: 0 nodes",
+            "an older host's tree has no tail"
+        );
     }
 
     #[test]

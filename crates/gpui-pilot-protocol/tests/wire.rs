@@ -298,6 +298,8 @@ fn version_three_adds_id_suffix_and_tree_dialog_state() {
         prompt: None,
         pick_queued: false,
         dialog: None,
+        settled: None,
+        settle_elapsed_ms: None,
     };
     assert_eq!(
         serde_json::to_value(&bare).unwrap(),
@@ -313,6 +315,8 @@ fn version_three_adds_id_suffix_and_tree_dialog_state() {
         prompt: Some(PromptInfo::new(PromptKind::Open, false)),
         pick_queued: true,
         dialog: None,
+        settled: None,
+        settle_elapsed_ms: None,
     };
     let value = serde_json::to_value(&waiting).unwrap();
     assert_eq!(value["prompt"], json!({"kind": "open", "multiple": false}));
@@ -360,6 +364,8 @@ fn version_four_adds_drag_and_dialogs() {
         prompt: None,
         pick_queued: false,
         dialog: Some(dialog.clone()),
+        settled: None,
+        settle_elapsed_ms: None,
     };
     let value = serde_json::to_value(&tree).unwrap();
     assert_eq!(
@@ -722,4 +728,55 @@ fn version_eleven_adds_resize_with_the_size_the_window_has_after() {
         r#"{"op":"resize","window":{"w":800.0,"h":600.0,"scale":1.5},"settled":true}"#
     );
     assert_eq!(serde_json::from_str::<Reply>(&text).unwrap(), reply);
+}
+
+#[test]
+fn a_tree_reply_carries_its_settle_and_an_older_one_omits_it() {
+    let mut value = json!({"op": "tree", "nodes": []});
+    let old: Reply = serde_json::from_value(value.clone()).unwrap();
+    let Reply::Tree {
+        settled,
+        settle_elapsed_ms,
+        ..
+    } = &old
+    else {
+        panic!("{old:?}")
+    };
+    assert_eq!(
+        (*settled, *settle_elapsed_ms),
+        (None, None),
+        "a tree from a host before these fields still parses"
+    );
+    assert_eq!(
+        serde_json::to_value(&old).unwrap(),
+        value,
+        "absent stays absent"
+    );
+
+    value["settled"] = json!(true);
+    value["settle_elapsed_ms"] = json!(42);
+    let new: Reply = serde_json::from_value(value.clone()).unwrap();
+    let Reply::Tree {
+        settled,
+        settle_elapsed_ms,
+        ..
+    } = &new
+    else {
+        panic!("{new:?}")
+    };
+    assert_eq!((*settled, *settle_elapsed_ms), (Some(true), Some(42)));
+    assert_eq!(serde_json::to_value(&new).unwrap(), value);
+
+    let zero = Reply::Tree {
+        nodes: vec![],
+        prompt: None,
+        pick_queued: false,
+        dialog: None,
+        settled: Some(false),
+        settle_elapsed_ms: Some(0),
+    };
+    assert_eq!(
+        serde_json::to_value(&zero).unwrap(),
+        json!({"op": "tree", "nodes": [], "settled": false, "settle_elapsed_ms": 0})
+    );
 }

@@ -536,7 +536,8 @@ impl Pilot {
         if let Some(Target::Point { .. }) = within {
             return Err(unsupported("`within` takes an element target, not a point"));
         }
-        self.settle(window, cx, settle_ms).await;
+        // The reply reports this settle, so the agent can tell a quiet tree from a cut-off one.
+        let settled = settle(&self.platform, window, cx, Duration::from_millis(settle_ms)).await;
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let observed = loop {
             let observed = observe_with_a11y(window, cx, |observed, _, _| Ok(observed))?;
@@ -566,6 +567,8 @@ impl Pilot {
             prompt: self.platform.pending_prompt().map(prompt_info),
             pick_queued: self.platform.has_queued_answer(),
             dialog: window.pending_dialog().map(dialog_info),
+            settled: Some(settled.settled),
+            settle_elapsed_ms: Some(u64::try_from(settled.elapsed.as_millis()).unwrap_or(u64::MAX)),
         })
     }
 

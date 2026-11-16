@@ -76,6 +76,21 @@ async fn drives_the_demo_through_the_whole_vocabulary() {
     assert!(crop["w"].as_u64().unwrap() < 640, "{crop}");
 
     let tree = pilot.ok("tree", json!({"wait_for": id("paste")})).await;
+    let quiet = pilot.result("tree", json!({"settle_ms": 2000})).await;
+    let value = quiet
+        .structured_content
+        .clone()
+        .expect("structured content");
+    assert_eq!(value["settled"], json!(true), "{value}");
+    assert!(
+        value["settle_elapsed_ms"].as_u64().unwrap() <= 2000,
+        "{value}"
+    );
+    let line = common::text(&quiet);
+    assert!(
+        line.lines().next().unwrap().contains("; settled in "),
+        "{line}"
+    );
     for name in ["count", "name", "open", "save", "paste"] {
         assert!(
             tree["nodes"]
@@ -259,6 +274,11 @@ async fn waits_hovers_and_reports_hits_end_to_end() {
     let launched = pilot.ok("launch", launch).await;
     assert_eq!(launched["settled"], json!(true));
     let tree = pilot.ok("tree", json!({"settle_ms": 0})).await;
+    assert_eq!(
+        (tree["settled"].clone(), tree["settle_elapsed_ms"].clone()),
+        (json!(false), json!(0)),
+        "{tree}"
+    );
     let nodes = tree["nodes"].as_array().unwrap();
     assert!(
         nodes.iter().any(|n| ends_with(&n["path"], "booted")),
@@ -853,6 +873,8 @@ fn old_host(dir: &std::path::Path, version: u32) -> PathBuf {
             hit: node,
             settled: true,
         })).unwrap(),
+        // A protocol-11-shaped tree without the settle fields, which no Reply literal can express.
+        "tree": json!({"ok": {"op": "tree", "nodes": []}}),
         "close": serde_json::to_value(Outcome::Ok(Reply::Closed)).unwrap(),
         "version": version,
     });
@@ -1085,6 +1107,16 @@ async fn a_protocol_ten_host_still_launches_and_clicks_and_a_resize_is_refused_f
         text.contains("kit-0.7.1-p18") && text.contains("protocol 10"),
         "{text}"
     );
+    let old_tree = pilot.result("tree", json!({})).await;
+    let value = old_tree
+        .structured_content
+        .clone()
+        .expect("structured content");
+    assert!(
+        value.get("settled").is_none() && value.get("settle_elapsed_ms").is_none(),
+        "{value}"
+    );
+    assert_eq!(common::text(&old_tree), "tree: 0 nodes");
     pilot.ok("close", json!({})).await;
     let requests = std::fs::read_to_string(scripts.path().join("requests")).unwrap();
     assert!(requests.contains(r#""version":10"#), "{requests}");
