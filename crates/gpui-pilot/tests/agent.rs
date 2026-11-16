@@ -301,14 +301,44 @@ fn tree_and_screenshot_read_the_placed_window() {
     };
     assert_eq!((w, h), (1872, 48));
 
-    let Reply::Tree { nodes, .. } = agent.ok(tree(None, None, 0)) else {
+    let Reply::Tree {
+        nodes,
+        settled,
+        settle_elapsed_ms,
+        ..
+    } = agent.ok(tree(None, None, 0))
+    else {
         panic!("not a tree")
     };
+    assert_eq!(
+        (settled, settle_elapsed_ms),
+        (Some(false), Some(0)),
+        "settle_ms 0 does not settle"
+    );
     let count = nodes
         .iter()
         .find(|n| n.id.as_deref() == Some("count"))
         .expect("count");
     assert_eq!(count.bounds, Rect::new(16., 50., 1248., 32.));
+    let Reply::Tree {
+        settled,
+        settle_elapsed_ms,
+        ..
+    } = agent.ok(Request::Tree {
+        within: None,
+        wait_for: None,
+        timeout_ms: 0,
+        settle_ms: 3000,
+    })
+    else {
+        panic!("not a tree")
+    };
+    assert_eq!(settled, Some(true));
+    let ms = settle_elapsed_ms.expect("settle_elapsed_ms");
+    assert!(
+        (160..=3000).contains(&ms),
+        "a settled session waits at least the 160 ms quiet window: {ms}"
+    );
     assert!(
         nodes
             .iter()
