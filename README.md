@@ -51,14 +51,14 @@ Host files are made visible inside the sandbox with `binds` in the config. Launc
 
 The server and host agree on a protocol version in their first message. This release speaks protocol 11. The server still launches hosts back to protocol 7: it retries at the version the host names and answers `Unsupported` for the features an older host lacks (`resize` needs 11, `drop` 10, a right or middle `drag` 9, `modifiers` on `click` and `drag` 8). To use a newer feature, move the app's `gpui-pilot-host` to the matching tag and rebuild the pilot binary.
 
-Releases are git tags with a semver version, for example `v0.2.0`. Each release states the gpui-kit version its host is built against: v0.1.0 is built against gpui-kit 0.7.1, v0.2.0 against gpui-kit 0.9.0. Use the same tag for the server and the host.
+Releases are git tags with a semver version, for example `v0.6.0`. Each release's host is built against one gpui-kit version: v0.1.0 against gpui-kit 0.7.1, v0.2.0 and v0.3.0 against 0.9.0, v0.3.1 to v0.5.0 against 0.9.1, and v0.6.0 against 0.10.0. A move to a new gpui-kit is a minor version, since the app has to move with it. Every release so far speaks protocol 11, so one installed server can drive apps pinned to different host tags.
 
 ## Requirements
 
 - Linux. The host builds on GPUI's Linux platform, and the server uses Unix sockets and Linux namespaces. macOS and Windows are not supported.
 - Rust 1.99 or newer.
 - A GPU that GPUI's wgpu renderer can use, plus the system libraries GPUI needs on Linux. Headless mode renders on the GPU even with no display.
-- An app on gpui-kit 0.9.0, the version the host pins.
+- An app on gpui-kit 0.10.0, the version the host pins (or an older host tag for an older gpui-kit; see above).
 - For session mode, also:
   - `bwrap` (bubblewrap), with unprivileged user namespaces enabled;
   - `kwin_wayland` (KDE Plasma 6) and `dbus-run-session`;
@@ -71,10 +71,10 @@ Releases are git tags with a semver version, for example `v0.2.0`. Each release 
 ## Install the server
 
 ```sh
-cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.2.0 gpui-pilot
+cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.6.0 gpui-pilot
 ```
 
-This installs `gpui-pilot` into `~/.cargo/bin`. `gpui-pilot mcp` (or `gpui-pilot` with no argument) serves MCP over stdio.
+This installs `gpui-pilot` into `~/.cargo/bin`. `gpui-pilot mcp` (or `gpui-pilot` with no argument) serves MCP over stdio, and `gpui-pilot --version` prints the installed version.
 
 ## Add the server to an agent
 
@@ -135,8 +135,8 @@ publish = false
 
 [dependencies]
 my-app = { path = "../../crates/my-app" }
-gpui-kit = "=0.9.0"
-gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.2.0" }
+gpui-kit = "=0.10.0"
+gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.6.0" }
 anyhow = "1"
 
 # Optional: optimised dependencies make the app much faster under the pilot.
@@ -241,12 +241,12 @@ Most tools take a target, which is one of:
 - `{"role": "Button", "name": "Save", "nth": 0}`: the nth element with this role and exact name (`nth` defaults to 0).
 - `{"x": 120, "y": 40}`: a point in logical pixels relative to the window's content.
 
-Actions wait for the target to be actionable (`timeout_ms`), then for the app to settle (`settle_ms`), before they reply.
+Actions wait for the target to be actionable (`timeout_ms`), then for the app to settle (`settle_ms`), before they reply. In headless mode settling also waits for the app's background work, so a long background job can use the whole budget; to time something during one, send the action with `settle_ms: 0` and `wait` for the element that shows the result.
 
 | Tool | What it does |
 | --- | --- |
 | `launch` | Build and start the configured app in `headless` or `session` mode, with window size, scale, `args`, `env`, network, `host_ports`, `refresh_hz`, `keep_data` and `project_dir` (a git worktree to launch from). |
-| `tree` | List the elements with their paths, roles, names, values, states and bounds, optionally only `within` one element; `max_chars` shortens long runs of similar rows. |
+| `tree` | List the elements with their paths, roles, names, values, states and bounds, optionally only `within` one element; `max_chars` shortens long runs of similar rows. The reply says whether the app settled first (`settled`) and how long that took (`settle_elapsed_ms`). |
 | `screenshot` | Capture the window, or one element, as a PNG. |
 | `click` | Click an element or point, with a button, a click count and held modifiers. |
 | `type` | Type text, optionally clicking a target first; `redact: true` keeps the text out of replies. |
@@ -288,7 +288,7 @@ printf '%s\n' 'launch {"mode": "headless"}' \
 - `drop` is headless only.
 - Headless mode shares the host's network; use session mode with `none` or `pasta` when the app must not reach it.
 - `frames` numbers are only meaningful when the app's dependencies are built optimised.
-- The host pins gpui-kit 0.9.0; an app on another gpui-kit version needs a host release built for that version.
+- The host pins gpui-kit 0.10.0; an app on another gpui-kit version needs a host release built for that version.
 
 ## Licence
 
