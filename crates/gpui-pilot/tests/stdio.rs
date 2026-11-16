@@ -38,6 +38,20 @@ async fn lists_the_seventeen_tools_with_read_only_hints() {
         let hint = tool.annotations.as_ref().and_then(|a| a.read_only_hint);
         assert_eq!(hint, Some(true), "{}", tool.name);
     }
+    // Settle waits out an app's background work, so agents timing an action during it are
+    // pointed at `settle_ms: 0` and `wait` (#21).
+    let wait = tools.iter().find(|t| t.name == "wait").unwrap();
+    let wait_text = wait.description.as_deref().unwrap_or_default();
+    assert!(wait_text.contains("`settle_ms: 0`"), "{wait_text}");
+    let click = tools.iter().find(|t| t.name == "click").unwrap();
+    let settle = &click.input_schema["properties"]["settle_ms"]["description"];
+    assert!(
+        settle
+            .as_str()
+            .unwrap_or_default()
+            .contains("background work"),
+        "{settle}"
+    );
 }
 
 #[tokio::test]

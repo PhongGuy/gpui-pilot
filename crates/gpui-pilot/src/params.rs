@@ -341,7 +341,8 @@ pub(crate) struct ClickArgs {
     /// How long to wait for the target to be actionable.
     #[serde(default = "action_timeout_ms")]
     pub timeout_ms: u64,
-    /// How long to wait for the app to settle afterwards.
+    /// How long to wait for the app to settle afterwards. Headless also waits for the app's
+    /// background work to finish, so a long background job can use the whole budget.
     #[serde(default = "settle_ms")]
     pub settle_ms: u64,
 }
@@ -360,7 +361,8 @@ pub(crate) struct TypeArgs {
     /// How long to wait for the target to be actionable.
     #[serde(default = "action_timeout_ms")]
     pub timeout_ms: u64,
-    /// How long to wait for the app to settle afterwards.
+    /// How long to wait for the app to settle afterwards. Headless also waits for the app's
+    /// background work to finish, so a long background job can use the whole budget.
     #[serde(default = "settle_ms")]
     pub settle_ms: u64,
 }
@@ -371,7 +373,8 @@ pub(crate) struct TypeArgs {
 pub(crate) struct KeyArgs {
     /// A GPUI keystroke such as `cmd-s` or `enter`.
     pub keys: String,
-    /// How long to wait for the app to settle afterwards.
+    /// How long to wait for the app to settle afterwards. Headless also waits for the app's
+    /// background work to finish, so a long background job can use the whole budget.
     #[serde(default = "settle_ms")]
     pub settle_ms: u64,
 }
@@ -404,7 +407,8 @@ pub(crate) struct ScrollArgs {
     /// How long to wait for the target to be actionable.
     #[serde(default = "action_timeout_ms")]
     pub timeout_ms: u64,
-    /// How long to wait for the app to settle afterwards.
+    /// How long to wait for the app to settle afterwards. Headless also waits for the app's
+    /// background work to finish, so a long background job can use the whole budget.
     #[serde(default = "settle_ms")]
     pub settle_ms: u64,
 }
@@ -440,7 +444,8 @@ pub(crate) struct HoverArgs {
     /// How long to wait for the target to be actionable.
     #[serde(default = "action_timeout_ms")]
     pub timeout_ms: u64,
-    /// How long to wait for the app to settle afterwards.
+    /// How long to wait for the app to settle afterwards. Headless also waits for the app's
+    /// background work to finish, so a long background job can use the whole budget.
     #[serde(default = "settle_ms")]
     pub settle_ms: u64,
 }
@@ -465,7 +470,8 @@ pub(crate) struct DragArgs {
     /// How long to wait for both ends to be actionable.
     #[serde(default = "action_timeout_ms")]
     pub timeout_ms: u64,
-    /// How long to wait for the app to settle afterwards.
+    /// How long to wait for the app to settle afterwards. Headless also waits for the app's
+    /// background work to finish, so a long background job can use the whole budget.
     #[serde(default = "settle_ms")]
     pub settle_ms: u64,
 }
@@ -484,7 +490,8 @@ pub(crate) struct DropArgs {
     /// How long to wait for the target to be actionable.
     #[serde(default = "action_timeout_ms")]
     pub timeout_ms: u64,
-    /// How long to wait for the app to settle afterwards.
+    /// How long to wait for the app to settle afterwards. Headless also waits for the app's
+    /// background work to finish, so a long background job can use the whole budget.
     #[serde(default = "settle_ms")]
     pub settle_ms: u64,
 }
@@ -497,7 +504,8 @@ pub(crate) struct ResizeArgs {
     pub width: f32,
     /// The window content's new height in logical pixels.
     pub height: f32,
-    /// How long to wait for the app to settle afterwards.
+    /// How long to wait for the app to settle afterwards. Headless also waits for the app's
+    /// background work to finish, so a long background job can use the whole budget.
     #[serde(default = "settle_ms")]
     pub settle_ms: u64,
 }
@@ -511,7 +519,8 @@ pub(crate) struct DialogArgs {
     /// With `button`, how long to wait for a dialog to appear; ignored when reading.
     #[serde(default = "action_timeout_ms")]
     pub timeout_ms: u64,
-    /// How long to wait for the app to settle afterwards.
+    /// How long to wait for the app to settle afterwards. Headless also waits for the app's
+    /// background work to finish, so a long background job can use the whole budget.
     #[serde(default = "settle_ms")]
     pub settle_ms: u64,
 }
@@ -544,7 +553,8 @@ pub(crate) struct PickFileArgs {
     /// Accepted for session mode; headless answers or queues at once.
     #[serde(default = "pick_timeout_ms")]
     pub timeout_ms: u64,
-    /// How long to wait for the app to settle afterwards.
+    /// How long to wait for the app to settle afterwards. Headless also waits for the app's
+    /// background work to finish, so a long background job can use the whole budget.
     #[serde(default = "settle_ms")]
     pub settle_ms: u64,
 }
@@ -555,7 +565,8 @@ pub(crate) struct PickFileArgs {
 pub(crate) struct ClipboardArgs {
     /// Replace the clipboard text; read it when absent.
     pub set: Option<String>,
-    /// How long to wait for the app to settle afterwards.
+    /// How long to wait for the app to settle afterwards. Headless also waits for the app's
+    /// background work to finish, so a long background job can use the whole budget.
     #[serde(default = "settle_ms")]
     pub settle_ms: u64,
 }
