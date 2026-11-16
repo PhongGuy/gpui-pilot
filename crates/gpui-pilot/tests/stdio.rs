@@ -145,3 +145,19 @@ fn an_unknown_command_exits_with_usage() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("usage"));
 }
+
+#[test]
+fn version_prints_the_package_version() {
+    for flag in ["--version", "-V"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_gpui-pilot"))
+            .arg(flag)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{flag}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("gpui-pilot {}\n", env!("CARGO_PKG_VERSION")),
+            "{flag}"
+        );
+    }
+}
