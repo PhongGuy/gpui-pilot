@@ -343,7 +343,7 @@ impl PilotServer {
     }
 
     #[tool(
-        description = "Wait for an element to appear or, with `gone`, to disappear; or wait `ms` milliseconds.",
+        description = "Wait for an element to appear or, with `gone`, to disappear; or wait `ms` milliseconds. To time an action while the app runs a long background job, send it with `settle_ms: 0`, then wait for the element that shows the result.",
         annotations(read_only_hint = true)
     )]
     async fn wait(
