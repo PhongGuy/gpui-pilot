@@ -290,6 +290,10 @@ printf '%s\n' 'launch {"mode": "headless"}' \
 - `frames` numbers are only meaningful when the app's dependencies are built optimised.
 - The host pins gpui-kit 0.10.0; an app on another gpui-kit version needs a host release built for that version.
 
+## Contributing
+
+Building gpui-pilot from source, the workspace layout, the tests and checks, CI, the conventions and how to send issues and PRs are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Licence
 
 Licensed under either of the [Apache License, Version 2.0](LICENSE-APACHE) or the [MIT licence](LICENSE-MIT), at your option.
