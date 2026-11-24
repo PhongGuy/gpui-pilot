@@ -674,14 +674,6 @@ impl<E: InteractiveElement> InteractiveElement for AriaDisabled<E> {
     }
 }
 
-impl<E: Element> IntoElement for AriaDisabled<E> {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl<E: Element> Element for AriaDisabled<E> {
     type RequestLayoutState = E::RequestLayoutState;
     type PrepaintState = E::PrepaintState;
