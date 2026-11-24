@@ -735,9 +735,7 @@ pub(crate) mod tests {
     use std::{borrow::Cow, cell::Cell, rc::Rc};
 
     use anyhow::anyhow;
-    use gpui_kit::{
-        AtlasKey, AtlasTile, DevicePixels, ScaledPixels, WindowHandle, WindowId, point, px, size,
-    };
+    use gpui_kit::{AtlasKey, AtlasTile, DevicePixels, WindowHandle, WindowId, point, px, size};
 
     use super::*;
 
@@ -975,12 +973,8 @@ pub(crate) mod tests {
     /// A scene of `layers` empty layers: `2 * layers` paint operations.
     fn scene_of(layers: usize) -> Scene {
         let mut scene = Scene::default();
-        let bounds = Bounds::new(
-            point(ScaledPixels(0.), ScaledPixels(0.)),
-            size(ScaledPixels(1.), ScaledPixels(1.)),
-        );
         for _ in 0..layers {
-            scene.push_layer(bounds);
+            scene.push_layer();
             scene.pop_layer();
         }
         scene
