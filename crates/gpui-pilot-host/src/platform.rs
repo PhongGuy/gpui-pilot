@@ -493,7 +493,9 @@ impl Platform for PilotPlatform {
         });
     }
 
-    fn dismiss_system_notification(&self, _tag: &str) {}
+    fn dismiss_system_notification(&self, _tag: &str) -> Task<()> {
+        Task::ready(())
+    }
 
     fn on_system_notification_response(
         &self,
