@@ -292,7 +292,7 @@ printf '%s\n' 'launch {"mode": "headless"}' \
 
 ## Contributing
 
-Building gpui-pilot from source, the workspace layout, the tests and checks, CI, the conventions and how to send issues and PRs are in [CONTRIBUTING.md](CONTRIBUTING.md).
+Issues and pull requests from anyone are welcome, first PRs included. Building gpui-pilot from source, the workspace layout, the tests and checks, CI, the conventions and how to send issues and PRs are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Licence
 

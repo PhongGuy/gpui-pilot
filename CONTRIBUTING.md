@@ -2,6 +2,16 @@
 
 This is the developer guide; the page for people who use gpui-pilot is [README.md](README.md).
 
+## Sending a change
+
+Issues and pull requests from anyone are welcome, and a first PR is fine: you don't need to ask before opening one. Before I merge, I check that:
+
+- the commands under [Build and check](#build-and-check) pass, with fmt and clippy clean;
+- the PR makes one change, with tests for new behaviour;
+- the README is updated when the change is something a user would look for.
+
+If something is missing, I'll say what and help get the PR over the line; a PR that isn't finished yet is a fine place to ask. For a larger change, opening an issue first lets us agree on the shape before you write the code.
+
 ## Requirements
 
 - Linux, Rust 1.99 or newer (the `rust-version` in `Cargo.toml`) and a GPU that GPUI's wgpu renderer can use.
