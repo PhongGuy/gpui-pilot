@@ -399,9 +399,30 @@ impl Pilot {
                     settled,
                 })
             }
-            Request::FramesStart { idle_ms, .. } => {
+            // Pin before the refresh so the priming frame builds the tree, and create the
+            // recorder after it so that frame is not stamped. A gone window drops the pin.
+            Request::FramesStart { idle_ms, a11y } => {
+                if window.is_recording() {
+                    return Err(PilotError::new(
+                        ErrorCode::InvalidArgument,
+                        "frames is already recording; call frames stop first",
+                    ));
+                }
+                if a11y {
+                    window.pin_a11y();
+                    let refreshed = on_window(&window, cx, |window, _| {
+                        window.refresh();
+                        Ok(())
+                    });
+                    if let Err(error) = refreshed {
+                        window.unpin_a11y();
+                        return Err(error);
+                    }
+                    window.tick();
+                }
                 let refresh_mhz = self.platform.refresh_hz() * 1000;
-                if !window.start_recording(Recorder::new(Instant::now(), refresh_mhz, idle_ms)) {
+                let recorder = Recorder::new(Instant::now(), refresh_mhz, idle_ms).with_a11y(a11y);
+                if !window.start_recording(recorder) {
                     return Err(PilotError::new(
                         ErrorCode::InvalidArgument,
                         "frames is already recording; call frames stop first",
@@ -410,6 +431,7 @@ impl Pilot {
                 Ok(Reply::FramesStarted { refresh_mhz })
             }
             Request::FramesStop => {
+                window.unpin_a11y();
                 let recorder = window.stop_recording().ok_or_else(|| {
                     PilotError::new(
                         ErrorCode::InvalidArgument,

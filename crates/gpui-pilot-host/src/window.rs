@@ -264,7 +264,13 @@ impl PilotWindow {
         };
         callback();
         let mut state = self.0.borrow_mut();
-        state.a11y = None;
+        // A pinned window still has GPUI's flag on; turn it off, or a frame drawn before GPUI
+        // removes the window would store a tree again.
+        if let Some(callbacks) = state.a11y.take()
+            && state.a11y_active
+        {
+            (callbacks.deactivation)();
+        }
         state.a11y_tree = None;
         state.a11y_active = false;
         state.a11y_pinned = false;
@@ -325,14 +331,12 @@ impl PilotWindow {
     }
 
     /// Turns accessibility on and holds it: `set_a11y(false)` is ignored until `unpin_a11y`.
-    #[allow(dead_code, reason = "the executor calls it in the next task")]
     pub(crate) fn pin_a11y(&self) {
         self.0.borrow_mut().a11y_pinned = true;
         self.set_a11y(true);
     }
 
     /// Releases the pin and turns accessibility off; a no-op when not pinned.
-    #[allow(dead_code, reason = "the executor calls it in the next task")]
     pub(crate) fn unpin_a11y(&self) {
         if !std::mem::take(&mut self.0.borrow_mut().a11y_pinned) {
             return;
