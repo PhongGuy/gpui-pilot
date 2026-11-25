@@ -38,7 +38,6 @@ async fn stop(h: &mut Harness, pilot: &Pilot) -> FrameReport {
     }
 }
 
-#[allow(dead_code)]
 async fn record(h: &mut Harness, pilot: &Pilot, a11y: bool, during: Request) -> FrameReport {
     let started = pilot.handle(start(a11y), &mut h.cx).await;
     assert!(
@@ -196,4 +195,27 @@ fn closing_the_window_mid_recording_leaves_a11y_off() {
         })
     );
     assert_eq!(after, (false, false));
+}
+
+/// Measures median and p95 `work` on an auto-panning board with a11y off and on, twice each,
+/// at 100 and 1000 leaves. Run by hand; see docs/research/2026-11-25-a11y-frames-cost.md.
+#[test]
+#[ignore = "a measurement, run by hand"]
+fn board_pan_work_with_and_without_a11y() {
+    for leaves in ["100", "1000"] {
+        for a11y in [false, true, false, true] {
+            let report = with_demo(640., 400., 1.0, move |mut h| async move {
+                open_board(&mut h, &["--board-shapes", leaves, "--board-autopan-now"]).await;
+                let pilot = Pilot::new(h.platform.clone());
+                record(&mut h, &pilot, a11y, wait_ms(3000)).await
+            });
+            let work = report.work.as_ref().expect("headless work");
+            eprintln!(
+                "leaves={leaves} a11y={a11y} frames={} work median={} p95={} max={} build={:?}",
+                report.frames, work.median_ms, work.p95_ms, work.max_ms, report.build
+            );
+            assert_eq!(report.a11y, a11y);
+            assert!(report.frames >= 30, "the board panned: {}", report.frames);
+        }
+    }
 }
