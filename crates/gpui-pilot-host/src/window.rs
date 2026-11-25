@@ -115,6 +115,8 @@ struct State {
     a11y: Option<gpui_kit::A11yCallbacks>,
     a11y_tree: Option<Rc<gpui_kit::accesskit::TreeUpdate>>,
     a11y_active: bool,
+    /// Held on by a recording: `set_a11y(false)` is ignored until `unpin_a11y`.
+    a11y_pinned: bool,
 }
 
 /// A prompt the app raised through `Window::prompt`, held for the agent to answer.
@@ -171,6 +173,7 @@ impl PilotWindow {
             a11y: None,
             a11y_tree: None,
             a11y_active: false,
+            a11y_pinned: false,
         })))
     }
 
@@ -264,6 +267,7 @@ impl PilotWindow {
         state.a11y = None;
         state.a11y_tree = None;
         state.a11y_active = false;
+        state.a11y_pinned = false;
         true
     }
 
@@ -300,6 +304,10 @@ impl PilotWindow {
     /// drops the stored tree, so a stale tree is never ranked against newer snapshots. The
     /// callbacks are taken out first, so no borrow is held while GPUI runs them.
     pub(crate) fn set_a11y(&self, active: bool) {
+        // A pinned window keeps its tree: an act scope's turn-off must not end a recording's a11y.
+        if !active && self.0.borrow().a11y_pinned {
+            return;
+        }
         let Some(callbacks) = self.0.borrow_mut().a11y.take() else {
             return;
         };
@@ -314,6 +322,22 @@ impl PilotWindow {
         if !active {
             state.a11y_tree = None;
         }
+    }
+
+    /// Turns accessibility on and holds it: `set_a11y(false)` is ignored until `unpin_a11y`.
+    #[allow(dead_code, reason = "the executor calls it in the next task")]
+    pub(crate) fn pin_a11y(&self) {
+        self.0.borrow_mut().a11y_pinned = true;
+        self.set_a11y(true);
+    }
+
+    /// Releases the pin and turns accessibility off; a no-op when not pinned.
+    #[allow(dead_code, reason = "the executor calls it in the next task")]
+    pub(crate) fn unpin_a11y(&self) {
+        if !std::mem::take(&mut self.0.borrow_mut().a11y_pinned) {
+            return;
+        }
+        self.set_a11y(false);
     }
 
     /// Test hook: tests that read `a11y_tree` after settling activate it first.
@@ -375,6 +399,11 @@ impl PilotWindow {
         }
         state.recorder = Some(recorder);
         true
+    }
+
+    /// Whether a recording is running.
+    pub fn is_recording(&self) -> bool {
+        self.0.borrow().recorder.is_some()
     }
 
     /// Ends the running recording and hands it back.
@@ -1051,5 +1080,64 @@ pub(crate) mod tests {
         assert_eq!(report.frames, 2);
         assert_eq!(report.work.expect("headless work").count, 2);
         assert!(window.stop_recording().is_none());
+    }
+
+    #[test]
+    fn a_pinned_window_keeps_a11y_through_scopes_until_unpinned_or_closed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let window = solid_window(Rc::new(Cell::new(1)), 8., 9.);
+        let deactivations = Arc::new(AtomicUsize::new(0));
+        let counted = deactivations.clone();
+        window.a11y_init(gpui_kit::A11yCallbacks {
+            activation: Box::new(|| None),
+            action: Box::new(|_| {}),
+            deactivation: Box::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }),
+        });
+        window.unpin_a11y();
+        assert_eq!(
+            deactivations.load(Ordering::SeqCst),
+            0,
+            "unpinning nothing is a no-op"
+        );
+
+        window.pin_a11y();
+        assert!(window.is_a11y_active());
+        // An act poll's scope inside the recording: on, then off.
+        window.set_a11y(true);
+        window.set_a11y(false);
+        assert!(
+            window.is_a11y_active(),
+            "the scope's end is ignored while pinned"
+        );
+        assert_eq!(deactivations.load(Ordering::SeqCst), 0);
+
+        window.unpin_a11y();
+        assert!(!window.is_a11y_active());
+        assert_eq!(deactivations.load(Ordering::SeqCst), 1);
+        window.set_a11y(true);
+        window.set_a11y(false);
+        assert!(
+            !window.is_a11y_active(),
+            "unpinned scopes turn it off again"
+        );
+
+        window.pin_a11y();
+        window.on_close(Box::new(|| {}));
+        assert!(window.close());
+        assert!(!window.is_a11y_active());
+        assert!(!window.0.borrow().a11y_pinned, "closing clears the pin");
+    }
+
+    #[test]
+    fn a_window_reports_whether_it_is_recording() {
+        use gpui_pilot_protocol::Recorder;
+        let window = solid_window(Rc::new(Cell::new(1)), 8., 9.);
+        assert!(!window.is_recording());
+        assert!(window.start_recording(Recorder::new(Instant::now(), 60_000, 100)));
+        assert!(window.is_recording());
+        window.stop_recording();
+        assert!(!window.is_recording());
     }
 }
