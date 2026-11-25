@@ -51,8 +51,9 @@ div().id("board").test_support().role(Role::Canvas)
 ```
 
 - **Rows:** a shape's path is `[.., <board>, <author id>]`, and its row carries role, name (the label), selected state and bounds. Click, drag, hover, scroll and `wait` take it as an `id` target like any other element.
-- **Covered shapes:** a click on a shape that a later sibling covers lands on its nearest uncovered point, or is `Occluded` with the cover as `hit`.
-- **Limits:** the push order must match the app's own hit test, or the reported `hit` is wrong. A cached board view that is not re-rendered lists no shapes. Session mode does not list shapes yet.
+- **Covered shapes:** a click on a shape that a later sibling covers lands on its nearest uncovered point, or is `Occluded` with the cover as `hit`. This holds in both modes; in session mode a shape outside its board with no free point is `Occluded` without a `hit`.
+- **Limits:** the push order must match the app's own hit test, or the reported `hit` is wrong. A cached board view that is not re-rendered lists no shapes.
+- **Session mode:** shapes are listed there too, by their author id as the element's `id`, with AT-SPI role names (`Panel` where headless says `Group`). The board's clip is honoured by moving the click inside the board. Cover and clip handling in session needs `.role(Role::Canvas)` on the board (headless does not); without it session lists the shapes and clicks their centres.
 
 ### Session mode
 
@@ -70,7 +71,7 @@ Host files are made visible inside the sandbox with `binds` in the config. Launc
 
 The server and host agree on a protocol version in their first message. This release speaks protocol 11. The server still launches hosts back to protocol 7: it retries at the version the host names and answers `Unsupported` for the features an older host lacks (`resize` needs 11, `drop` 10, a right or middle `drag` 9, `modifiers` on `click` and `drag` 8). To use a newer feature, move the app's `gpui-pilot-host` to the matching tag and rebuild the pilot binary.
 
-Releases are git tags with a semver version, for example `v0.8.0`. Each release's host is built against one gpui-kit version: v0.1.0 against gpui-kit 0.7.1, v0.2.0 and v0.3.0 against 0.9.0, v0.3.1 to v0.5.0 against 0.9.1, v0.6.0 against 0.10.0, and v0.7.0 and v0.8.0 against 0.11.0. A move to a new gpui-kit is a minor version, since the app has to move with it. Every release so far speaks protocol 11, so one installed server can drive apps pinned to different host tags.
+Releases are git tags with a semver version, for example `v0.8.1`. Each release's host is built against one gpui-kit version: v0.1.0 against gpui-kit 0.7.1, v0.2.0 and v0.3.0 against 0.9.0, v0.3.1 to v0.5.0 against 0.9.1, v0.6.0 against 0.10.0, and v0.7.0 to v0.8.1 against 0.11.0. A move to a new gpui-kit is a minor version, since the app has to move with it. Every release so far speaks protocol 11, so one installed server can drive apps pinned to different host tags.
 
 ## Requirements
 
@@ -90,7 +91,7 @@ Releases are git tags with a semver version, for example `v0.8.0`. Each release'
 ## Install the server
 
 ```sh
-cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.8.0 gpui-pilot
+cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.8.1 gpui-pilot
 ```
 
 This installs `gpui-pilot` into `~/.cargo/bin`. `gpui-pilot mcp` (or `gpui-pilot` with no argument) serves MCP over stdio, and `gpui-pilot --version` prints the installed version.
@@ -155,7 +156,7 @@ publish = false
 [dependencies]
 my-app = { path = "../../crates/my-app" }
 gpui-kit = "=0.11.0"
-gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.8.0" }
+gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.8.1" }
 anyhow = "1"
 
 # Optional: optimised dependencies make the app much faster under the pilot.
