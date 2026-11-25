@@ -198,8 +198,9 @@ fn not_running() -> ToolError {
 
 /// Refuses, before anything reaches the host, a request that uses a field the host's protocol
 /// predates: `modifiers` on `click` and `drag` need a protocol 8 host, and a non-left `button`
-/// on `drag` a protocol 9 one, `drop` a protocol 10 one, `resize` a protocol 11 one and `a11y` on `frames` a protocol 12 one; an
-/// older host would close the connection on them or refuse them as unreadable.
+/// on `drag` a protocol 9 one, `drop` a protocol 10 one, `resize` a protocol 11 one and `a11y`
+/// on `frames` a protocol 12 one; an older host would close the connection on them or refuse
+/// them as unreadable.
 fn refuse_unsupported(request: &Request, host_version: u32) -> Result<(), ToolError> {
     if matches!(request, Request::FramesStart { a11y: true, .. })
         && host_version < A11Y_FRAMES_VERSION

@@ -13,7 +13,7 @@ It targets apps built on [gpui-kit](https://crates.io/crates/gpui-kit) and runs 
       |  MCP over stdio
       v
  gpui-pilot  (the server: reads gpui-pilot.toml, builds and launches the app)
-      |  JSON lines over a Unix socket, protocol version 11
+      |  JSON lines over a Unix socket, protocol version 12
       +--> headless: your pilot binary, which runs the app on gpui-pilot-host
       +--> session:  your normal app binary, in a private KWin session inside a bwrap sandbox
 ```
@@ -69,9 +69,9 @@ Host files are made visible inside the sandbox with `binds` in the config. Launc
 
 ### Protocol version
 
-The server and host agree on a protocol version in their first message. This release speaks protocol 11. The server still launches hosts back to protocol 7: it retries at the version the host names and answers `Unsupported` for the features an older host lacks (`resize` needs 11, `drop` 10, a right or middle `drag` 9, `modifiers` on `click` and `drag` 8). To use a newer feature, move the app's `gpui-pilot-host` to the matching tag and rebuild the pilot binary.
+The server and host agree on a protocol version in their first message. This release speaks protocol 12. The server still launches hosts back to protocol 7: it retries at the version the host names and answers `Unsupported` for the features an older host lacks (`a11y` on `frames` needs 12, `resize` needs 11, `drop` 10, a right or middle `drag` 9, `modifiers` on `click` and `drag` 8). To use a newer feature, move the app's `gpui-pilot-host` to the matching tag and rebuild the pilot binary.
 
-Releases are git tags with a semver version, for example `v0.8.1`. Each release's host is built against one gpui-kit version: v0.1.0 against gpui-kit 0.7.1, v0.2.0 and v0.3.0 against 0.9.0, v0.3.1 to v0.5.0 against 0.9.1, v0.6.0 against 0.10.0, and v0.7.0 to v0.8.1 against 0.11.0. A move to a new gpui-kit is a minor version, since the app has to move with it. Every release so far speaks protocol 11, so one installed server can drive apps pinned to different host tags.
+Releases are git tags with a semver version, for example `v0.9.0`. Each release's host is built against one gpui-kit version: v0.1.0 against gpui-kit 0.7.1, v0.2.0 and v0.3.0 against 0.9.0, v0.3.1 to v0.5.0 against 0.9.1, v0.6.0 against 0.10.0, and v0.7.0 to v0.9.0 against 0.11.0. A move to a new gpui-kit is a minor version, since the app has to move with it. v0.1.0 to v0.8.1 speak protocol 11 and v0.9.0 speaks 12. The server launches hosts back to protocol 7, so the newest installed server drives apps pinned to any of these tags; an older server cannot drive a newer host.
 
 ## Requirements
 
@@ -91,7 +91,7 @@ Releases are git tags with a semver version, for example `v0.8.1`. Each release'
 ## Install the server
 
 ```sh
-cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.8.1 gpui-pilot
+cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.9.0 gpui-pilot
 ```
 
 This installs `gpui-pilot` into `~/.cargo/bin`. `gpui-pilot mcp` (or `gpui-pilot` with no argument) serves MCP over stdio, and `gpui-pilot --version` prints the installed version.
@@ -156,7 +156,7 @@ publish = false
 [dependencies]
 my-app = { path = "../../crates/my-app" }
 gpui-kit = "=0.11.0"
-gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.8.1" }
+gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.9.0" }
 anyhow = "1"
 
 # Optional: optimised dependencies make the app much faster under the pilot.
@@ -276,7 +276,7 @@ Actions wait for the target to be actionable (`timeout_ms`), then for the app to
 | `drag` | Press on one target, move in steps and release on another, with any mouse button and held modifiers. |
 | `drop` | Drop files or folders from outside onto a target, as a file manager would. Headless only. |
 | `resize` | Resize the window's content to a size in logical pixels without moving the pointer. |
-| `frames` | Start and stop a recording of the app's frames; the report gives frame intervals, frames over budget and wheel input latency. |
+| `frames` | Start and stop a recording of the app's frames; the report gives frame intervals, frames over budget and wheel input latency. `a11y: true` (headless only) keeps GPUI's accessibility tree built on every recorded frame, so its cost shows in `work`. Read it as a delta between recordings with and without `a11y` on the same build: the host is a debug-assertions build, so absolute numbers are inflated, and the measured difference (about 0.2 to 0.55 ms more per frame for 1000 leaves in the timing profile) is too unstable to gate on. |
 | `dialog` | Read the GPUI prompt the app is showing, or answer it with a button label. |
 | `pick_file` | Answer the app's open or save file dialog with paths, or cancel it. |
 | `clipboard` | Read the clipboard text, or replace it. |
@@ -306,6 +306,7 @@ printf '%s\n' 'launch {"mode": "headless"}' \
 - The headless host and the session binary must be debug builds.
 - One app per server at a time; launching another while one runs needs `replace: true`.
 - `drop` is headless only.
+- `frames` with `a11y` is headless only; session mode refuses it with `Unsupported`.
 - Headless mode shares the host's network; use session mode with `none` or `pasta` when the app must not reach it.
 - `frames` numbers are only meaningful when the app's dependencies are built optimised.
 - The host pins gpui-kit 0.11.0; an app on another gpui-kit version needs a host release built for that version.
