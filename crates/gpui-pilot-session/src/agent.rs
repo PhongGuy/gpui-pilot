@@ -577,7 +577,7 @@ impl Agent {
     fn wait_stable_tree(&mut self, deadline: Instant) -> Result<(), SessionError> {
         let mut last: Option<Vec<Node>> = None;
         loop {
-            let why = match self.session.tree(self.app.pid()) {
+            let why = match self.session.tree_until(self.app.pid(), deadline) {
                 Ok(nodes) => {
                     let why = match &last {
                         Some(last) => match tree::unstable(last, &nodes) {
