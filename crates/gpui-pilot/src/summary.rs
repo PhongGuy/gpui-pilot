@@ -274,6 +274,9 @@ fn frames(value: &Value) -> String {
         number(&value["counted_intervals"]),
         number(&value["late"])
     ));
+    if value["a11y"].as_bool() == Some(true) {
+        line.push_str("; a11y on");
+    }
     let warnings: Vec<&str> = value["warnings"]
         .as_array()
         .map(|w| w.iter().filter_map(Value::as_str).collect())
@@ -743,6 +746,14 @@ mod tests {
         assert_eq!(
             summary("frames", &idle),
             "frames: 0 frames in 300 ms at 144.000 Hz; no intervals; over budget 0 of 0 counted; late 0"
+        );
+        let with_a11y = json!({"refresh_mhz": 60_000, "frames": 0, "duration_ms": 300.0,
+            "counted_intervals": 0, "over_budget": 0, "late": 0, "a11y": true,
+            "warnings": ["unoptimised_host"]});
+        assert_eq!(
+            summary("frames", &with_a11y),
+            "frames: 0 frames in 300 ms at 60.000 Hz; no intervals; over budget 0 of 0 counted; \
+             late 0; a11y on; warnings: unoptimised_host"
         );
     }
 }

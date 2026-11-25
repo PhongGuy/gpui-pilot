@@ -318,7 +318,7 @@ impl PilotServer {
     }
 
     #[tool(
-        description = "Record the app's frames between `action: start` and `action: stop`; stop reports frame intervals, frames over the display's budget and input latency of wheel notches. While recording, scroll with `settle_ms: 0` and a point target, since settle and id targets perturb timing. `idle_ms` (start only, default 100) marks longer intervals as idle gaps."
+        description = "Record the app's frames between `action: start` and `action: stop`; stop reports frame intervals, frames over the display's budget and input latency of wheel notches. While recording, scroll with `settle_ms: 0` and a point target, since settle and id targets perturb timing. `idle_ms` (start only, default 100) marks longer intervals as idle gaps. `a11y: true` (start only) keeps GPUI's accessibility tree built on every frame of a headless recording, so `work` includes the app's a11y build; read it against a recording without. Headless only: session mode answers Unsupported, since session frames carry no work. While it is on, a kit menu that focuses itself during prepaint can crash a debug app. Needs a host built from v0.9.0 or later."
     )]
     async fn frames(
         &self,

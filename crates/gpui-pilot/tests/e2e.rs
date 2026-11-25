@@ -1167,3 +1167,51 @@ async fn canvas_shapes_are_listed_selected_and_resized_by_id_end_to_end() {
     assert!(ends_with(&covered["hit"]["path"], "shape-4"), "{covered}");
     assert_eq!(pilot.ok("close", json!({})).await["exit_code"], json!(0));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn frames_with_a11y_report_it_and_a_protocol_eleven_host_refuses_it() {
+    let pilot = Pilot::start(Some(&config())).await;
+    let mut args = launch_args();
+    args["args"] = json!(["--board"]);
+    pilot.ok("launch", args).await;
+    pilot
+        .ok("frames", json!({"action": "start", "a11y": true}))
+        .await;
+    pilot.ok("click", json!({"target": id("shape-2")})).await;
+    let stopped = pilot.result("frames", json!({"action": "stop"})).await;
+    let report = stopped
+        .structured_content
+        .clone()
+        .expect("structured content");
+    assert_eq!(report["a11y"], json!(true), "{report}");
+    assert!(
+        common::text(&stopped).contains("; a11y on"),
+        "{}",
+        common::text(&stopped)
+    );
+    pilot.ok("frames", json!({"action": "start"})).await;
+    let plain = pilot.ok("frames", json!({"action": "stop"})).await;
+    assert!(plain.get("a11y").is_none(), "{plain}");
+    pilot.ok("close", json!({})).await;
+
+    let scripts = tempfile::tempdir().unwrap();
+    let host = old_host(scripts.path(), 11);
+    let old = Pilot::start(Some(&format!(
+        "[headless]\nbinary = \"{}\"\n",
+        host.display()
+    )))
+    .await;
+    old.ok("launch", launch_args()).await;
+    let refused = old
+        .err("frames", json!({"action": "start", "a11y": true}))
+        .await;
+    assert_eq!(refused["code"], json!("Unsupported"));
+    let text = refused["message"].as_str().unwrap();
+    assert!(
+        text.contains("v0.9.0") && text.contains("protocol 11"),
+        "{text}"
+    );
+    old.ok("close", json!({})).await;
+    let requests = std::fs::read_to_string(scripts.path().join("requests")).unwrap();
+    assert!(!requests.contains(r#""op":"frames_start""#), "{requests}");
+}
