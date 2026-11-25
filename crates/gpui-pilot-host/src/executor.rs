@@ -784,7 +784,7 @@ fn on_window<T>(
 
 /// Ticks inactive, draws one frame with accessibility on, then in one update observes the
 /// snapshots, ranks them, appends `a11y_only` and `authored` rows (both read against the
-/// snapshots alone), turns accessibility off and runs `f`.
+/// snapshots alone), turns accessibility off (unless a recording pinned it) and runs `f`.
 /// Without a tree the snapshots pass through unranked.
 fn observe_with_a11y<R>(
     window: &PilotWindow,
