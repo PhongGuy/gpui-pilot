@@ -22,10 +22,98 @@ use gpui_kit::{
     InspectorElementId, Interactivity, LayoutId, Modifiers, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, PromptLevel, Role, ScrollDelta,
     ScrollEvent, TestSupportExt as _, UniformListScrollHandle, Window, WindowDecorations,
-    WindowHandle, WindowOptions, accesskit, div, px, uniform_list,
+    WindowHandle, WindowOptions, accesskit, canvas, div, fill, point, px, rgb, size, uniform_list,
 };
 
 gpui_kit::actions!(pilot_demo, [Pick]);
+
+/// Side of a shape's resize handle, centred on its bottom-right corner.
+pub const HANDLE: f32 = 8.;
+
+/// One shape on the `--board` canvas, in board coordinates before the pan.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shape {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub role: Role,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub selected: bool,
+    /// The author id of the resize handle drawn on the bottom-right corner, if any.
+    pub handle: Option<&'static str>,
+}
+
+impl Shape {
+    /// The handle's rectangle as `(x, y, w, h)`.
+    pub fn handle_rect(&self) -> (f32, f32, f32, f32) {
+        (
+            self.x + self.w - HANDLE / 2.,
+            self.y + self.h - HANDLE / 2.,
+            HANDLE,
+            HANDLE,
+        )
+    }
+}
+
+/// What a point on the board lands on: an index into `DemoView::shapes`.
+enum BoardHit {
+    Handle(usize),
+    Shape(usize),
+}
+
+/// The board's shapes in push order, which is also paint order, bottom first.
+fn board_shapes() -> Vec<Shape> {
+    let shape = |id, label, role, (x, y, w, h), handle| Shape {
+        id,
+        label,
+        role,
+        x,
+        y,
+        w,
+        h,
+        selected: false,
+        handle,
+    };
+    vec![
+        shape(
+            "shape-1",
+            "Frame",
+            Role::Group,
+            (20., 20., 200., 140.),
+            Some("handle-1-se"),
+        ),
+        shape(
+            "label-1",
+            "Frame label",
+            Role::Label,
+            (60., 60., 120., 60.),
+            None,
+        ),
+        shape(
+            "shape-2",
+            "Card B",
+            Role::Group,
+            (260., 20., 100., 80.),
+            Some("handle-2-se"),
+        ),
+        shape(
+            "shape-3",
+            "Card C",
+            Role::Group,
+            (420., 20., 100., 80.),
+            Some("handle-3-se"),
+        ),
+        shape(
+            "shape-4",
+            "Cover",
+            Role::Group,
+            (410., 10., 120., 100.),
+            None,
+        ),
+    ]
+}
 
 /// Rows in the `--list` fixture, enough that a notch never reaches its end.
 pub const LIST_ROWS: usize = 10_000;
@@ -89,6 +177,13 @@ pub struct DemoView {
     /// On `--big-value N`, the window shows only the `name` input and a `big` element whose
     /// accessibility value is N chars, the digit `i % 10` at char `i`.
     pub big_value: Option<gpui_kit::SharedString>,
+    /// On `--board`, the window shows a `pan` button above a canvas whose shapes are published
+    /// as accessibility leaves under the author ids in `shapes`.
+    pub board: bool,
+    pub shapes: Vec<Shape>,
+    pub pan: (f32, f32),
+    resizing: Option<usize>,
+    board_origin: Rc<Cell<gpui_kit::Point<Pixels>>>,
     /// On `--popover`, the window shows only a click-opened kit popover over observed rows.
     pub popover: bool,
     /// Clicks on the popover's `pop-item`, and on any of the `under-*` rows below it.
@@ -231,6 +326,11 @@ impl DemoView {
             data_reused: None,
             list: false,
             big_value: None,
+            board: false,
+            shapes: board_shapes(),
+            pan: (0., 0.),
+            resizing: None,
+            board_origin: Rc::new(Cell::new(gpui_kit::Point::default())),
             popover: false,
             pop_clicks: 0,
             under_clicks: 0,
@@ -287,6 +387,9 @@ impl DemoView {
         }
         if args.iter().any(|arg| arg == "--popover") {
             self.popover = true;
+        }
+        if args.iter().any(|arg| arg == "--board") {
+            self.board = true;
         }
         if args.iter().any(|arg| arg == "--secret") {
             self.secret_form = true;
@@ -765,6 +868,9 @@ impl Render for DemoView {
         if self.popover {
             return self.popover_fixture(cx).into_any_element();
         }
+        if self.board {
+            return self.board_fixture(window, cx).into_any_element();
+        }
         if let Some(value) = self.big_value.clone() {
             return v_flex()
                 .size_full()
@@ -1152,6 +1258,166 @@ impl Render for DemoView {
 }
 
 impl DemoView {
+    pub fn shape(&self, id: &str) -> Option<&Shape> {
+        self.shapes.iter().find(|s| s.id == id)
+    }
+
+    /// What window point `at` lands on: handles first, then shapes, each from the top of the
+    /// push order down, so the app's hit test agrees with the host's rank.
+    fn board_hit(&self, at: gpui_kit::Point<Pixels>) -> Option<BoardHit> {
+        let origin = self.board_origin.get();
+        let x = f32::from(at.x - origin.x) - self.pan.0;
+        let y = f32::from(at.y - origin.y) - self.pan.1;
+        let inside = |(rx, ry, rw, rh): (f32, f32, f32, f32)| {
+            x >= rx && x < rx + rw && y >= ry && y < ry + rh
+        };
+        let handle = (0..self.shapes.len())
+            .rev()
+            .find(|&i| self.shapes[i].handle.is_some() && inside(self.shapes[i].handle_rect()));
+        if let Some(i) = handle {
+            return Some(BoardHit::Handle(i));
+        }
+        (0..self.shapes.len())
+            .rev()
+            .find(|&i| {
+                let s = &self.shapes[i];
+                inside((s.x, s.y, s.w, s.h))
+            })
+            .map(BoardHit::Shape)
+    }
+
+    /// A pan button above a canvas that publishes its shapes as synthetic accessibility leaves
+    /// under the board's own node, as an app drawing on a GPUI canvas would.
+    fn board_fixture(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (scale, pan) = (window.scale_factor(), self.pan);
+        let (shapes, painted, origin) = (
+            self.shapes.clone(),
+            self.shapes.clone(),
+            self.board_origin.clone(),
+        );
+        v_flex()
+            .size_full()
+            .p(px(16.))
+            .gap(px(8.))
+            .child(Button::new("pan").label("Pan").on_click(cx.listener(
+                |view: &mut Self, _, _, cx| {
+                    view.pan = (view.pan.0 + 30., view.pan.1 + 20.);
+                    cx.notify();
+                },
+            )))
+            .child(
+                div()
+                    .id("board")
+                    .role(Role::Canvas)
+                    .test_support()
+                    .relative()
+                    .w(px(600.))
+                    .h(px(300.))
+                    // Shapes are board-relative; the board's own node already holds its device
+                    // bounds, so its corner anchors them. Push order is paint order, bottom first.
+                    .a11y_synthetic_children(move |b| {
+                        let (ox, oy) = b.parent_node().bounds().map_or((0., 0.), |r| (r.x0, r.y0));
+                        let s = f64::from(scale);
+                        let device = |(x, y, w, h): (f32, f32, f32, f32)| {
+                            let (x, y) = (f64::from(x + pan.0), f64::from(y + pan.1));
+                            accesskit::Rect {
+                                x0: ox + x * s,
+                                y0: oy + y * s,
+                                x1: ox + (x + f64::from(w)) * s,
+                                y1: oy + (y + f64::from(h)) * s,
+                            }
+                        };
+                        for shape in &shapes {
+                            let mut node = accesskit::Node::new(shape.role);
+                            node.set_author_id(shape.id);
+                            node.set_label(shape.label);
+                            node.set_selected(shape.selected);
+                            node.set_bounds(device((shape.x, shape.y, shape.w, shape.h)));
+                            let id = b.synthetic_node_id(shape.id);
+                            b.push_child(id, node);
+                        }
+                        for shape in &shapes {
+                            let Some(handle) = shape.handle else { continue };
+                            let mut node = accesskit::Node::new(Role::Button);
+                            node.set_author_id(handle);
+                            node.set_label(format!("Resize {}", shape.label));
+                            node.set_bounds(device(shape.handle_rect()));
+                            let id = b.synthetic_node_id(handle);
+                            b.push_child(id, node);
+                        }
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view: &mut Self, event: &MouseDownEvent, _, cx| {
+                            match view.board_hit(event.position) {
+                                Some(BoardHit::Handle(i)) => view.resizing = Some(i),
+                                Some(BoardHit::Shape(i)) => {
+                                    view.shapes[i].selected = !view.shapes[i].selected
+                                }
+                                None => return,
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_move(
+                        cx.listener(|view: &mut Self, event: &MouseMoveEvent, _, cx| {
+                            let Some(i) = view.resizing else { return };
+                            let (origin, pan) = (view.board_origin.get(), view.pan);
+                            let shape = &mut view.shapes[i];
+                            shape.w =
+                                (f32::from(event.position.x - origin.x) - pan.0 - shape.x).max(20.);
+                            shape.h =
+                                (f32::from(event.position.y - origin.y) - pan.1 - shape.y).max(20.);
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|view: &mut Self, _: &MouseUpEvent, _, cx| {
+                            if view.resizing.take().is_some() {
+                                cx.notify();
+                            }
+                        }),
+                    )
+                    // The canvas fills the board, so its prepaint origin is the board's corner for
+                    // the hit test; it paints shapes, then handles, in push order.
+                    .child(
+                        canvas(
+                            move |bounds, _, _| origin.set(bounds.origin),
+                            move |bounds, (), window, _| {
+                                let rect = |(x, y, w, h): (f32, f32, f32, f32)| {
+                                    Bounds::new(
+                                        point(
+                                            bounds.origin.x + px(x + pan.0),
+                                            bounds.origin.y + px(y + pan.1),
+                                        ),
+                                        size(px(w), px(h)),
+                                    )
+                                };
+                                for shape in &painted {
+                                    let colour = if shape.selected {
+                                        rgb(0x3b82f6)
+                                    } else {
+                                        rgb(0xcbd5e1)
+                                    };
+                                    window.paint_quad(fill(
+                                        rect((shape.x, shape.y, shape.w, shape.h)),
+                                        colour,
+                                    ));
+                                }
+                                for shape in painted.iter().filter(|s| s.handle.is_some()) {
+                                    window
+                                        .paint_quad(fill(rect(shape.handle_rect()), rgb(0x0f172a)));
+                                }
+                            },
+                        )
+                        .size_full(),
+                    ),
+            )
+    }
+}
+
+impl DemoView {
     /// A click-opened kit popover whose content (a button and an observed div) is drawn over
     /// the observed `under-*` rows laid out below its trigger.
     fn popover_fixture(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1273,7 +1539,7 @@ impl gpui_pilot_host::PilotApp for Demo {
     /// its count in the launch's data dir on `--persist`, and guards its close on
     /// `--guard-close`, applies `--dir`, `--fetch`, `--render-delay-ms` and `--late-paint-ms`,
     /// shows data reuse on `--show-data`, shows only the long list on `--list`, only the
-    /// popover fixture on `--popover`, and only the context menu fixture on `--context-menu`.
+    /// popover fixture on `--popover`, and only the context menu fixture on `--context-menu`, and the canvas fixture on `--board`.
     fn open(&self, launch: &gpui_pilot_host::Launch, cx: &mut App) -> anyhow::Result<()> {
         let (handle, demo) = open(cx)?;
         if launch.args.iter().any(|arg| arg == "--guard-close") {
