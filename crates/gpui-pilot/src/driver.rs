@@ -6,9 +6,9 @@ use std::process::{Child, ExitStatus};
 use std::time::{Duration, Instant};
 
 use gpui_pilot_protocol::{
-    Answered, DEFAULT_REFRESH_HZ, DRAG_BUTTON_VERSION, DROP_VERSION, ErrorCode, LaunchParams,
-    MODIFIERS_VERSION, MouseButton, Outcome, PROTOCOL_VERSION, PickAnswer, PilotError,
-    REFRESH_RATES_HZ, RESIZE_VERSION, Reply, Request, Target,
+    A11Y_FRAMES_VERSION, Answered, DEFAULT_REFRESH_HZ, DRAG_BUTTON_VERSION, DROP_VERSION,
+    ErrorCode, LaunchParams, MODIFIERS_VERSION, MouseButton, Outcome, PROTOCOL_VERSION, PickAnswer,
+    PilotError, REFRESH_RATES_HZ, RESIZE_VERSION, Reply, Request, Target,
 };
 use gpui_pilot_session::SessionError;
 use gpui_pilot_session::sandbox;
@@ -198,9 +198,21 @@ fn not_running() -> ToolError {
 
 /// Refuses, before anything reaches the host, a request that uses a field the host's protocol
 /// predates: `modifiers` on `click` and `drag` need a protocol 8 host, and a non-left `button`
-/// on `drag` a protocol 9 one, `drop` a protocol 10 one and `resize` a protocol 11 one; an
-/// older host would close the connection on them or refuse them as unreadable.
+/// on `drag` a protocol 9 one, `drop` a protocol 10 one, `resize` a protocol 11 one and `a11y`
+/// on `frames` a protocol 12 one; an older host would close the connection on them or refuse
+/// them as unreadable.
 fn refuse_unsupported(request: &Request, host_version: u32) -> Result<(), ToolError> {
+    if matches!(request, Request::FramesStart { a11y: true, .. })
+        && host_version < A11Y_FRAMES_VERSION
+    {
+        return Err(ToolError::new(
+            ErrorCode::Unsupported,
+            format!(
+                "`a11y` on frames needs a host built from v0.9.0 or later; \
+                 this host speaks protocol {host_version}"
+            ),
+        ));
+    }
     if matches!(request, Request::Resize { .. }) && host_version < RESIZE_VERSION {
         return Err(ToolError::new(
             ErrorCode::Unsupported,
@@ -911,9 +923,27 @@ mod tests {
     use crate::config::CONFIG_FILE;
     use crate::launch::ProcessGroup;
     use crate::launch::tests::short_temp;
-    use gpui_pilot_protocol::{Modifier, PickAnswer, Request};
+    use gpui_pilot_protocol::{A11Y_FRAMES_VERSION, Modifier, PickAnswer, Request};
     use serde_json::json;
     use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn frames_with_a11y_is_refused_for_a_host_before_protocol_twelve() {
+        let start = |a11y| Request::FramesStart { idle_ms: 100, a11y };
+        for old in [7, 11] {
+            let error = refuse_unsupported(&start(true), old).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::Unsupported);
+            assert!(
+                error.error.message.contains("a11y")
+                    && error.error.message.contains("v0.9.0")
+                    && error.error.message.contains(&format!("protocol {old}")),
+                "{}",
+                error.error.message
+            );
+            assert!(refuse_unsupported(&start(false), old).is_ok());
+        }
+        assert!(refuse_unsupported(&start(true), A11Y_FRAMES_VERSION).is_ok());
+    }
 
     #[test]
     fn a_failed_chunk_reports_a_lower_bound_on_the_characters_typed() {

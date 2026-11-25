@@ -430,6 +430,9 @@ pub(crate) struct FramesArgs {
     /// Intervals longer than this are idle gaps (default 100, 0 to 10000); start only.
     #[serde(default)]
     pub idle_ms: Option<u64>,
+    /// Keep GPUI's accessibility tree built on every recorded frame (default false); start only.
+    #[serde(default)]
+    pub a11y: Option<bool>,
 }
 
 /// The longest `wait` for a fixed duration, so the call stays well inside a client's patience.
@@ -679,7 +682,7 @@ impl ScrollArgs {
 }
 
 impl FramesArgs {
-    /// `start` with `idle_ms` up to 10000 (default 100); `stop` takes no `idle_ms`.
+    /// `start` with `idle_ms` up to 10000 (default 100) and optional `a11y`; `stop` takes neither.
     pub fn request(self) -> Result<Request, ToolError> {
         let invalid = |message: &str| Err(ToolError::new(ErrorCode::InvalidArgument, message));
         match (self.action, self.idle_ms) {
@@ -688,8 +691,12 @@ impl FramesArgs {
             }
             (FramesAction::Start, idle_ms) => Ok(Request::FramesStart {
                 idle_ms: idle_ms.unwrap_or(IDLE_MS),
+                a11y: self.a11y.unwrap_or(false),
             }),
             (FramesAction::Stop, Some(_)) => invalid("`idle_ms` applies to `start` only"),
+            (FramesAction::Stop, None) if self.a11y.is_some() => {
+                invalid("`a11y` applies to `start` only")
+            }
             (FramesAction::Stop, None) => Ok(Request::FramesStop),
         }
     }
@@ -1339,16 +1346,51 @@ mod tests {
     }
 
     #[test]
+    fn frames_takes_a11y_on_start_only() {
+        let request = |value: Value| args::<FramesArgs>(value).unwrap().request();
+        assert_eq!(
+            request(json!({"action": "start", "a11y": true})).unwrap(),
+            Request::FramesStart {
+                idle_ms: 100,
+                a11y: true
+            }
+        );
+        assert_eq!(
+            request(json!({"action": "start"})).unwrap(),
+            Request::FramesStart {
+                idle_ms: 100,
+                a11y: false
+            }
+        );
+        for bad in [
+            json!({"action": "stop", "a11y": true}),
+            json!({"action": "stop", "a11y": false}),
+        ] {
+            assert_eq!(
+                request(bad.clone()).unwrap_err().code(),
+                ErrorCode::InvalidArgument,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
     fn frames_starts_with_an_idle_threshold_and_stops_bare() {
         let frames = |value: Value| args::<FramesArgs>(value);
         let request = |value: Value| frames(value).unwrap().request();
         assert_eq!(
             request(json!({"action": "start"})).unwrap(),
-            Request::FramesStart { idle_ms: 100 }
+            Request::FramesStart {
+                idle_ms: 100,
+                a11y: false
+            }
         );
         assert_eq!(
             request(json!({"action": "start", "idle_ms": 0})).unwrap(),
-            Request::FramesStart { idle_ms: 0 }
+            Request::FramesStart {
+                idle_ms: 0,
+                a11y: false
+            }
         );
         assert_eq!(
             request(json!({"action": "stop"})).unwrap(),

@@ -901,9 +901,14 @@ impl Agent {
                 let settled = self.settle(ms(settle_ms));
                 Ok(Reply::Clipboard { text, settled })
             }
+            // Session frames carry no work, so there is no accessibility cost to label.
+            Request::FramesStart { a11y: true, .. } => Err(Failure::Pilot(PilotError::new(
+                ErrorCode::Unsupported,
+                "a11y frames are headless only; session frames carry no work",
+            ))),
             // The session's only `InvalidArgument` here is the recording state, answered in
             // the headless host's words.
-            Request::FramesStart { idle_ms } => {
+            Request::FramesStart { idle_ms, .. } => {
                 let refresh_mhz = self.refresh_mhz;
                 match self
                     .session

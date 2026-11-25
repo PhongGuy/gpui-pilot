@@ -497,7 +497,10 @@ fn version_seven_carries_the_refresh_rate() {
 
 #[test]
 fn version_seven_records_frames_and_sends_wheel_notches() {
-    let start = Request::FramesStart { idle_ms: 100 };
+    let start = Request::FramesStart {
+        idle_ms: 100,
+        a11y: false,
+    };
     assert_eq!(
         serde_json::to_value(&start).unwrap(),
         json!({"op": "frames_start", "idle_ms": 100})
@@ -706,7 +709,6 @@ fn version_ten_adds_drop_with_explicit_fields() {
 
 #[test]
 fn version_eleven_adds_resize_with_the_size_the_window_has_after() {
-    assert_eq!(PROTOCOL_VERSION, 11);
     assert_eq!(gpui_pilot_protocol::RESIZE_VERSION, 11);
     let resize = Request::Resize {
         width: 800.0,
@@ -778,5 +780,54 @@ fn a_tree_reply_carries_its_settle_and_an_older_one_omits_it() {
     assert_eq!(
         serde_json::to_value(&zero).unwrap(),
         json!({"op": "tree", "nodes": [], "settled": false, "settle_elapsed_ms": 0})
+    );
+}
+
+#[test]
+fn version_twelve_records_frames_with_accessibility_on() {
+    assert_eq!(PROTOCOL_VERSION, 12);
+    assert_eq!(gpui_pilot_protocol::A11Y_FRAMES_VERSION, 12);
+    let on = Request::FramesStart {
+        idle_ms: 100,
+        a11y: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&on).unwrap(),
+        json!({"op": "frames_start", "idle_ms": 100, "a11y": true})
+    );
+    round_trip(on);
+    let off = Request::FramesStart {
+        idle_ms: 100,
+        a11y: false,
+    };
+    assert_eq!(
+        serde_json::to_value(&off).unwrap(),
+        json!({"op": "frames_start", "idle_ms": 100}),
+        "off is the protocol 7 frame"
+    );
+    assert_eq!(
+        serde_json::from_value::<Request>(json!({"op": "frames_start", "idle_ms": 100})).unwrap(),
+        off
+    );
+
+    let t0 = Instant::now();
+    let plain = Recorder::new(t0, 60_000, 100).finish(t0 + Duration::from_millis(5), None);
+    assert!(!plain.a11y);
+    let value = serde_json::to_value(Reply::Frames(plain.clone())).unwrap();
+    assert!(value.get("a11y").is_none(), "{value}");
+    assert_eq!(
+        serde_json::from_value::<Reply>(value).unwrap(),
+        Reply::Frames(plain),
+        "a report without a11y deserialises with the field false"
+    );
+    let report = Recorder::new(t0, 60_000, 100)
+        .with_a11y(true)
+        .finish(t0 + Duration::from_millis(5), None);
+    assert!(report.a11y);
+    let value = serde_json::to_value(Reply::Frames(report.clone())).unwrap();
+    assert_eq!(value["a11y"], json!(true));
+    assert_eq!(
+        serde_json::from_value::<Reply>(value).unwrap(),
+        Reply::Frames(report)
     );
 }

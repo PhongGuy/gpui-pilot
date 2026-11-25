@@ -59,6 +59,10 @@ pub struct FrameReport {
     pub work: Option<Spread>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildInfo>,
+    /// True: the host pinned GPUI's accessibility on for every recorded frame. Absent means not
+    /// stated (an older host, a session, no flag), never "off".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub a11y: bool,
     pub warnings: Vec<String>,
 }
 
@@ -68,6 +72,7 @@ pub struct Recorder {
     started: Instant,
     refresh_mhz: u32,
     idle_ms: u64,
+    a11y: bool,
     frames: Vec<(Instant, Option<Duration>)>,
     notches: Vec<(Instant, Instant)>,
     ended: bool,
@@ -81,11 +86,18 @@ impl Recorder {
             started,
             refresh_mhz,
             idle_ms,
+            a11y: false,
             frames: Vec::new(),
             notches: Vec::new(),
             ended: false,
             truncated: false,
         }
+    }
+
+    /// Marks the recording as made with accessibility on; `finish` reports it.
+    pub fn with_a11y(mut self, a11y: bool) -> Self {
+        self.a11y = a11y;
+        self
     }
 
     /// Stamps a drawn frame; once ended or full the stamp is dropped and the recording truncated.
@@ -204,6 +216,7 @@ impl Recorder {
             send_lag_max_ms: send_lag_max.map(round),
             work: spread(&works),
             build,
+            a11y: self.a11y,
             warnings,
         }
     }

@@ -844,11 +844,19 @@ fn frames_record_wheel_notches_in_session_mode() {
         ErrorCode::InvalidArgument
     );
     assert_eq!(
-        agent.ok(Request::FramesStart { idle_ms: 100 }),
+        agent.ok(Request::FramesStart {
+            idle_ms: 100,
+            a11y: false,
+        }),
         Reply::FramesStarted { refresh_mhz }
     );
     assert_eq!(
-        agent.err(Request::FramesStart { idle_ms: 100 }).code,
+        agent
+            .err(Request::FramesStart {
+                idle_ms: 100,
+                a11y: false,
+            })
+            .code,
         ErrorCode::InvalidArgument
     );
     let notches = |wheel| Request::Scroll {
@@ -904,9 +912,17 @@ fn frames_record_wheel_notches_in_session_mode() {
     // recording refuses without ending the first.
     let (mut agent, _) = Agent::start(PROTOCOL_VERSION);
     agent.wait_state("opened");
-    agent.ok(Request::FramesStart { idle_ms: 100 });
+    agent.ok(Request::FramesStart {
+        idle_ms: 100,
+        a11y: false,
+    });
     assert_eq!(
-        agent.err(Request::FramesStart { idle_ms: 100 }).code,
+        agent
+            .err(Request::FramesStart {
+                idle_ms: 100,
+                a11y: false,
+            })
+            .code,
         ErrorCode::InvalidArgument
     );
     let pixels = Request::Scroll {
@@ -1043,4 +1059,36 @@ fn resize_changes_the_window_geometry_and_the_capture() {
         .expect("the viewport readout");
     assert_eq!(viewport.name.as_deref(), Some("Viewport 960x600"));
     assert_eq!(agent.ok(Request::Close), Reply::Closed);
+}
+
+#[test]
+fn frames_with_a11y_are_unsupported_in_session_mode_and_start_nothing() {
+    if !session_tests() {
+        return;
+    }
+    let (mut agent, _) = Agent::start(PROTOCOL_VERSION);
+    agent.wait_state("opened");
+    let error = agent.err(Request::FramesStart {
+        idle_ms: 100,
+        a11y: true,
+    });
+    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert!(
+        error.message.starts_with("a11y frames are headless only"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        agent.err(Request::FramesStop).code,
+        ErrorCode::InvalidArgument,
+        "the refusal started no recording"
+    );
+    assert!(matches!(
+        agent.ok(Request::FramesStart {
+            idle_ms: 100,
+            a11y: false,
+        }),
+        Reply::FramesStarted { .. }
+    ));
+    assert!(matches!(agent.ok(Request::FramesStop), Reply::Frames(_)));
 }
