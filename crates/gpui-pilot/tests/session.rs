@@ -654,8 +654,7 @@ async fn a_screenshot_after_a_settled_tree_shows_a_long_final_frame() {
     pilot.ok("close", json!({})).await;
 }
 
-/// A session launch of the debug windowed demo at scale 1, where shape extents are whole
-/// logical pixels.
+/// A session launch at scale 1, where shape extents are whole logical pixels.
 fn shapes_launch(args: &[&str]) -> Value {
     json!({"mode": "session", "width": 1280, "height": 800, "scale": 1.0, "build": false,
            "network": "none", "args": args})
@@ -705,7 +704,51 @@ async fn a_board_panning_from_startup_still_launches() {
     }
     assert!(
         xs.windows(2).any(|w| w[0] != w[1]),
-        "the shapes kept moving while listed: {xs:?}"
+        "the shapes never moved: {xs:?}"
     );
     pilot.ok("close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_covered_or_clipped_shape_is_clicked_where_only_it_is_drawn() {
+    if !session_tests(Network::None) {
+        return;
+    }
+    assert!(
+        windowed().exists(),
+        "run `cargo build -p pilot-demo --bins` first"
+    );
+    for scale in [1.0, 2.0] {
+        let pilot = Pilot::start(Some(&config())).await;
+        let mut launch = shapes_launch(&["--board-shapes", "4"]);
+        launch["scale"] = json!(scale);
+        pilot.ok("launch", launch).await;
+        // shape-3 covers shape-2's centre: a centre click would select shape-3.
+        let clicked = pilot
+            .ok("click", json!({"target": {"id": ["shape-2"]}}))
+            .await;
+        assert_eq!(clicked["clicked"]["id"], json!("shape-2"), "scale {scale}");
+        let tree = pilot.ok("tree", json!({})).await;
+        assert_eq!(
+            by_id(&tree, "shape-2")["selected"],
+            json!(true),
+            "scale {scale}: {tree}"
+        );
+        assert_eq!(
+            by_id(&tree, "shape-3")["selected"],
+            json!(false),
+            "scale {scale}: {tree}"
+        );
+        // shape-0's centre is on the board's left edge, where the board clips it.
+        pilot
+            .ok("click", json!({"target": {"id": ["shape-0"]}}))
+            .await;
+        let tree = pilot.ok("tree", json!({})).await;
+        assert_eq!(
+            by_id(&tree, "shape-0")["selected"],
+            json!(true),
+            "scale {scale}: {tree}"
+        );
+        pilot.ok("close", json!({})).await;
+    }
 }
