@@ -752,3 +752,112 @@ async fn a_covered_or_clipped_shape_is_clicked_where_only_it_is_drawn() {
         pilot.ok("close", json!({})).await;
     }
 }
+
+fn headless_config() -> String {
+    format!(
+        "[headless]\nbinary = \"{}\"\n",
+        common::pilot_demo().display()
+    )
+}
+
+/// The node in a headless `tree` reply whose path ends in `own`.
+fn by_path_end(tree: &Value, own: &str) -> Value {
+    tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["path"].as_array().and_then(|p| p.last()) == Some(&json!(own)))
+        .unwrap_or_else(|| panic!("no `{own}` in the headless tree"))
+        .clone()
+}
+
+/// The centre of the `Pan` button in a `tree` reply, as a point target.
+fn pan_point(tree: &Value) -> Value {
+    let pan = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["role"] == json!("Button") && n["name"] == json!("Pan"))
+        .unwrap_or_else(|| panic!("no Pan button: {tree}"));
+    let b = |k: &str| pan["bounds"][k].as_f64().unwrap();
+    json!({"x": b("x") + b("w") / 2., "y": b("y") + b("h") / 2.})
+}
+
+fn assert_parity(session: &Value, headless: &Value, when: &str) {
+    for i in 0..4u64 {
+        let own = format!("shape-{i}");
+        let (s, h) = (by_id(session, &own), by_path_end(headless, &own));
+        assert_eq!(
+            s["role"],
+            json!("Panel"),
+            "{when} {own}: session roles are AT-SPI names"
+        );
+        assert_eq!(h["role"], json!("Group"), "{when} {own}");
+        assert_eq!(s["name"], h["name"], "{when} {own}");
+        assert_eq!(s["selected"], h["selected"], "{when} {own}");
+        assert_eq!(
+            s["path"].as_array().unwrap().last(),
+            Some(&json!(i)),
+            "{when} {own}: the child index is the push order"
+        );
+        for k in ["x", "y", "w", "h"] {
+            let (a, b) = (
+                s["bounds"][k].as_f64().unwrap(),
+                h["bounds"][k].as_f64().unwrap(),
+            );
+            assert!(
+                (a - b).abs() <= 1.,
+                "{when} {own} {k}: session {a}, headless {b}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_shapes_read_and_act_like_headless_ones() {
+    if !session_tests(Network::None) {
+        return;
+    }
+    assert!(
+        windowed().exists(),
+        "run `cargo build -p pilot-demo --bins` first"
+    );
+    let session = Pilot::start(Some(&config())).await;
+    let headless = Pilot::start(Some(&headless_config())).await;
+    let args = ["--board-shapes", "4"];
+    session.ok("launch", shapes_launch(&args)).await;
+    headless
+        .ok(
+            "launch",
+            json!({"mode": "headless", "width": 1280, "height": 800, "scale": 1.0,
+                   "build": false, "args": args}),
+        )
+        .await;
+    let (s, h) = (
+        session.ok("tree", json!({})).await,
+        headless.ok("tree", json!({})).await,
+    );
+    assert_parity(&s, &h, "at rest");
+    let before = by_id(&s, "shape-0")["bounds"]["x"].as_f64().unwrap();
+
+    for pilot in [&session, &headless] {
+        pilot
+            .ok("click", json!({"target": {"id": ["shape-1"]}}))
+            .await;
+    }
+    session.ok("click", json!({"target": pan_point(&s)})).await;
+    headless.ok("click", json!({"target": pan_point(&h)})).await;
+    let (s, h) = (
+        session.ok("tree", json!({})).await,
+        headless.ok("tree", json!({})).await,
+    );
+    assert_parity(&s, &h, "after a select and a pan");
+    assert_eq!(by_id(&s, "shape-1")["selected"], json!(true), "{s}");
+    let after = by_id(&s, "shape-0")["bounds"]["x"].as_f64().unwrap();
+    assert!(
+        (after - before - 30.).abs() <= 1.,
+        "the pan moved shape-0: {before} -> {after}"
+    );
+    session.ok("close", json!({})).await;
+    headless.ok("close", json!({})).await;
+}
