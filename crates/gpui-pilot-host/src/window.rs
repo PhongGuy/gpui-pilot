@@ -263,17 +263,19 @@ impl PilotWindow {
             return false;
         };
         callback();
-        let mut state = self.0.borrow_mut();
         // A pinned window still has GPUI's flag on; turn it off, or a frame drawn before GPUI
-        // removes the window would store a tree again.
-        if let Some(callbacks) = state.a11y.take()
-            && state.a11y_active
+        // removes the window would store a tree again. Taken out first, as in `set_a11y`.
+        let (callbacks, active) = {
+            let mut state = self.0.borrow_mut();
+            state.a11y_pinned = false;
+            (state.a11y.take(), std::mem::take(&mut state.a11y_active))
+        };
+        if let Some(callbacks) = callbacks
+            && active
         {
             (callbacks.deactivation)();
         }
-        state.a11y_tree = None;
-        state.a11y_active = false;
-        state.a11y_pinned = false;
+        self.0.borrow_mut().a11y_tree = None;
         true
     }
 
@@ -1131,6 +1133,11 @@ pub(crate) mod tests {
         window.on_close(Box::new(|| {}));
         assert!(window.close());
         assert!(!window.is_a11y_active());
+        assert_eq!(
+            deactivations.load(Ordering::SeqCst),
+            3,
+            "closing a pinned window runs GPUI's deactivation"
+        );
         assert!(!window.0.borrow().a11y_pinned, "closing clears the pin");
     }
 
