@@ -36,7 +36,13 @@ fn notches(n: i32, notch_ms: u64) -> Request {
 
 async fn record(h: &mut Harness, pilot: &Pilot, during: Request) -> FrameReport {
     let started = pilot
-        .handle(Request::FramesStart { idle_ms: 100 }, &mut h.cx)
+        .handle(
+            Request::FramesStart {
+                idle_ms: 100,
+                a11y: false,
+            },
+            &mut h.cx,
+        )
         .await;
     assert_eq!(
         started,
@@ -83,11 +89,23 @@ fn start_and_stop_out_of_order_are_invalid_arguments() {
         let pilot = Pilot::new(h.platform.clone());
         let early = code(pilot.handle(Request::FramesStop, &mut h.cx).await);
         pilot
-            .handle(Request::FramesStart { idle_ms: 100 }, &mut h.cx)
+            .handle(
+                Request::FramesStart {
+                    idle_ms: 100,
+                    a11y: false,
+                },
+                &mut h.cx,
+            )
             .await;
         let twice = code(
             pilot
-                .handle(Request::FramesStart { idle_ms: 100 }, &mut h.cx)
+                .handle(
+                    Request::FramesStart {
+                        idle_ms: 100,
+                        a11y: false,
+                    },
+                    &mut h.cx,
+                )
                 .await,
         );
         (early, twice)

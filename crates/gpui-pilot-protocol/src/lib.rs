@@ -15,7 +15,9 @@ pub mod stats;
 pub use stats::{BuildInfo, FrameReport, Recorder, Spread};
 
 /// The protocol revision both ends must agree on in `hello`.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
+/// The first protocol whose hosts accept `a11y` on `frames_start`.
+pub const A11Y_FRAMES_VERSION: u32 = 12;
 
 /// The oldest host protocol the server still launches. A server at `PROTOCOL_VERSION` retries
 /// a host that refuses its `Hello` at the version that host names, down to this one, and
@@ -497,9 +499,12 @@ pub enum Request {
         timeout_ms: u64,
         settle_ms: u64,
     },
-    /// Start recording frames; a gap longer than `idle_ms` counts as idle, not as a frame.
+    /// Start recording frames; a gap longer than `idle_ms` counts as idle, not as a frame. With
+    /// `a11y`, GPUI builds its accessibility tree on every recorded frame.
     FramesStart {
         idle_ms: u64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        a11y: bool,
     },
     /// Stop the recording and answer its report.
     FramesStop,

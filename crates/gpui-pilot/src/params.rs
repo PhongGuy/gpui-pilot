@@ -688,6 +688,7 @@ impl FramesArgs {
             }
             (FramesAction::Start, idle_ms) => Ok(Request::FramesStart {
                 idle_ms: idle_ms.unwrap_or(IDLE_MS),
+                a11y: false,
             }),
             (FramesAction::Stop, Some(_)) => invalid("`idle_ms` applies to `start` only"),
             (FramesAction::Stop, None) => Ok(Request::FramesStop),
@@ -1344,11 +1345,17 @@ mod tests {
         let request = |value: Value| frames(value).unwrap().request();
         assert_eq!(
             request(json!({"action": "start"})).unwrap(),
-            Request::FramesStart { idle_ms: 100 }
+            Request::FramesStart {
+                idle_ms: 100,
+                a11y: false
+            }
         );
         assert_eq!(
             request(json!({"action": "start", "idle_ms": 0})).unwrap(),
-            Request::FramesStart { idle_ms: 0 }
+            Request::FramesStart {
+                idle_ms: 0,
+                a11y: false
+            }
         );
         assert_eq!(
             request(json!({"action": "stop"})).unwrap(),

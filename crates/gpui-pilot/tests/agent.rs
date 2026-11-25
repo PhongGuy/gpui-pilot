@@ -844,11 +844,19 @@ fn frames_record_wheel_notches_in_session_mode() {
         ErrorCode::InvalidArgument
     );
     assert_eq!(
-        agent.ok(Request::FramesStart { idle_ms: 100 }),
+        agent.ok(Request::FramesStart {
+            idle_ms: 100,
+            a11y: false,
+        }),
         Reply::FramesStarted { refresh_mhz }
     );
     assert_eq!(
-        agent.err(Request::FramesStart { idle_ms: 100 }).code,
+        agent
+            .err(Request::FramesStart {
+                idle_ms: 100,
+                a11y: false,
+            })
+            .code,
         ErrorCode::InvalidArgument
     );
     let notches = |wheel| Request::Scroll {
@@ -904,9 +912,17 @@ fn frames_record_wheel_notches_in_session_mode() {
     // recording refuses without ending the first.
     let (mut agent, _) = Agent::start(PROTOCOL_VERSION);
     agent.wait_state("opened");
-    agent.ok(Request::FramesStart { idle_ms: 100 });
+    agent.ok(Request::FramesStart {
+        idle_ms: 100,
+        a11y: false,
+    });
     assert_eq!(
-        agent.err(Request::FramesStart { idle_ms: 100 }).code,
+        agent
+            .err(Request::FramesStart {
+                idle_ms: 100,
+                a11y: false,
+            })
+            .code,
         ErrorCode::InvalidArgument
     );
     let pixels = Request::Scroll {

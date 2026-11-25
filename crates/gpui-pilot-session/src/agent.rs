@@ -903,7 +903,7 @@ impl Agent {
             }
             // The session's only `InvalidArgument` here is the recording state, answered in
             // the headless host's words.
-            Request::FramesStart { idle_ms } => {
+            Request::FramesStart { idle_ms, .. } => {
                 let refresh_mhz = self.refresh_mhz;
                 match self
                     .session

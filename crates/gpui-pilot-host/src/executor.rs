@@ -399,7 +399,7 @@ impl Pilot {
                     settled,
                 })
             }
-            Request::FramesStart { idle_ms } => {
+            Request::FramesStart { idle_ms, .. } => {
                 let refresh_mhz = self.platform.refresh_hz() * 1000;
                 if !window.start_recording(Recorder::new(Instant::now(), refresh_mhz, idle_ms)) {
                     return Err(PilotError::new(
