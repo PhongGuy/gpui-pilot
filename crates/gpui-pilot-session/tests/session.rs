@@ -141,7 +141,7 @@ fn inner_stopped_app() {
         let error = session.tree(demo.pid()).unwrap_err();
         let took = started.elapsed();
         assert!(
-            matches!(&error, SessionError::Timeout(m) if m.contains("not answering")),
+            matches!(&error, SessionError::Unanswered(m) if m.contains("did not answer")),
             "{error:?}"
         );
         assert!(

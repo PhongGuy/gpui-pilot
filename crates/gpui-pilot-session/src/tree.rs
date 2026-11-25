@@ -66,7 +66,7 @@ pub(crate) fn walk(
 /// child-index path; `children` lists a node's child object paths. A node below the root that
 /// vanishes mid-walk (`UnknownObject`, as a re-rendering app drops it) is skipped with its
 /// subtree; any other error, or the root vanishing, fails the walk. A call the app does not
-/// answer, or a walk still going at `deadline`, fails it as `Timeout`.
+/// answer fails it as `Unanswered`, a walk still going at `deadline` as `Timeout`.
 fn collect(
     root: String,
     deadline: Instant,
@@ -89,10 +89,8 @@ fn collect(
         let (node, kids) = match listed {
             Ok(listed) => listed,
             Err(error) if not_answering(&error) => {
-                return Err(SessionError::Timeout(format!(
-                    "the app is not answering accessibility requests (none within {} s); a debug \
-                     build busy drawing every frame cannot answer: launch an optimised build or \
-                     start animation after launch",
+                return Err(SessionError::Unanswered(format!(
+                    "the app did not answer an accessibility request within {} s",
                     CALL_LIMIT.as_secs()
                 )));
             }
@@ -421,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_the_app_does_not_answer_fails_the_walk_as_not_answering() {
+    fn a_call_the_app_does_not_answer_fails_the_walk_as_unanswered() {
         let no_reply = |p: &str| reply("org.freedesktop.DBus.Error.NoReply", p);
         let fdo = |p: &str| zbus::Error::FDO(Box::new(zbus::fdo::Error::NoReply(p.into())));
         let fails: [fn(&str) -> zbus::Error; 3] = [timed_out, no_reply, fdo];
@@ -429,8 +427,9 @@ mod tests {
             // The application object, an inner node and a leaf: none is skipped as vanished.
             for gone in ["app", "a", "b1"] {
                 match fake_walk(TREE, &[gone], fail) {
-                    Err(SessionError::Timeout(m)) => {
-                        assert!(m.contains("not answering") && m.contains("2 s"), "{m}")
+                    Err(SessionError::Unanswered(m)) => {
+                        assert!(m.contains("did not answer") && m.contains("2 s"), "{m}");
+                        assert!(!m.contains("optimised"), "no launch advice: {m}");
                     }
                     other => panic!("{gone}: {other:?}"),
                 }

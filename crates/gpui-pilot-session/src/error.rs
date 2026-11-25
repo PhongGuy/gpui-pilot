@@ -21,6 +21,9 @@ pub enum SessionError {
     InvalidArgument(String),
     #[error("{0}")]
     Timeout(String),
+    /// The app left one accessibility call unanswered for `CALL_LIMIT`; reports as `Timeout`.
+    #[error("{0}")]
+    Unanswered(String),
     #[error("{0}")]
     Unsupported(String),
     #[error("{0}")]
@@ -37,7 +40,7 @@ impl SessionError {
             SessionError::UnsupportedCharacter(_) => ErrorCode::UnsupportedCharacter,
             SessionError::InvalidKeystroke(_) => ErrorCode::InvalidKeystroke,
             SessionError::InvalidArgument(_) => ErrorCode::InvalidArgument,
-            SessionError::Timeout(_) => ErrorCode::Timeout,
+            SessionError::Timeout(_) | SessionError::Unanswered(_) => ErrorCode::Timeout,
             SessionError::Unsupported(_) => ErrorCode::Unsupported,
             SessionError::Internal(_) => ErrorCode::Internal,
         }

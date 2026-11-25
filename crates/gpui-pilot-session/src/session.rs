@@ -495,7 +495,8 @@ impl Session {
     }
 
     /// The app's accessible nodes, as `tree`, read by `min(deadline, now + WALK_LIMIT)`.
-    /// `Timeout` when a call goes unanswered for `CALL_LIMIT` or the walk passes its deadline.
+    /// `Unanswered` when a call goes unanswered for `CALL_LIMIT`, `Timeout` when the walk passes
+    /// its deadline.
     pub fn tree_until(&mut self, pid: u32, deadline: Instant) -> Result<Vec<Node>, SessionError> {
         let a11y = self.a11y.clone();
         let scale = self.output.scale;

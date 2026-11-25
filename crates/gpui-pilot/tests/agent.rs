@@ -1092,3 +1092,106 @@ fn frames_with_a11y_are_unsupported_in_session_mode_and_start_nothing() {
     ));
     assert!(matches!(agent.ok(Request::FramesStop), Reply::Frames(_)));
 }
+
+/// Sends SIGCONT when dropped, so a failing assertion never leaves the demo stopped.
+struct Resume(Pid);
+
+impl Drop for Resume {
+    fn drop(&mut self) {
+        let _ = rustix::process::kill_process(self.0, Signal::CONT);
+    }
+}
+
+/// The host pid of the demo running under the agent's sandbox, found by its command name
+/// among the sandbox's descendants (the sandbox has a pid namespace of its own).
+fn demo_pid(root: u32) -> Pid {
+    // Each process's parent, from the field after the name in `/proc/<pid>/stat`.
+    let parents: Vec<(u32, u32)> = std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+            let ppid = stat.rsplit(") ").next()?.split(' ').nth(1)?.parse().ok()?;
+            Some((pid, ppid))
+        })
+        .collect();
+    let mut found = vec![root];
+    let mut at = 0;
+    while at < found.len() {
+        let parent = found[at];
+        found.extend(
+            parents
+                .iter()
+                .filter(|(_, p)| *p == parent)
+                .map(|(c, _)| *c),
+        );
+        at += 1;
+    }
+    let demo = found
+        .into_iter()
+        .find(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|comm| comm.trim_end() == "pilot-demo-wind")
+        })
+        .expect("the demo runs under the sandbox");
+    Pid::from_raw(demo as i32).unwrap()
+}
+
+/// Stops the demo and resumes it from a thread after `stall`.
+fn stall_for(pid: Pid, stall: Duration) -> std::thread::JoinHandle<()> {
+    rustix::process::kill_process(pid, Signal::STOP).unwrap();
+    std::thread::spawn(move || {
+        std::thread::sleep(stall);
+        let _ = rustix::process::kill_process(pid, Signal::CONT);
+    })
+}
+
+#[test]
+fn calls_after_launch_wait_out_a_short_accessibility_stall() {
+    if !session_tests() {
+        return;
+    }
+    use gpui_pilot_protocol::WaitUntil;
+    let (mut agent, hello) = Agent::start(PROTOCOL_VERSION);
+    assert!(
+        matches!(hello, Outcome::Ok(Reply::Hello { .. })),
+        "{hello:?}"
+    );
+    let pid = demo_pid(agent.child.id());
+    let _resume = Resume(pid);
+    let visible = |timeout_ms| Request::Wait {
+        until: WaitUntil::Visible(id("count")),
+        timeout_ms,
+    };
+
+    // A 3 s stall outlasts one unanswered call (2 s) but not the tool's timeout.
+    let resumer = stall_for(pid, Duration::from_secs(3));
+    let Reply::Wait { node, waited_ms } = agent.ok(visible(10_000)) else {
+        panic!("not a wait")
+    };
+    resumer.join().unwrap();
+    assert!(node.is_some() && waited_ms >= 3000, "{node:?} {waited_ms}");
+
+    let resumer = stall_for(pid, Duration::from_secs(3));
+    let reply = agent.ok(click(id("count"), 10_000));
+    resumer.join().unwrap();
+    assert!(matches!(reply, Reply::Click { .. }), "{reply:?}");
+    agent.wait_state("clicks=1 name=\"\"");
+
+    // Stopped past the tool's timeout: a plain Timeout naming it, without launch advice.
+    rustix::process::kill_process(pid, Signal::STOP).unwrap();
+    let started = Instant::now();
+    let error = agent.err(visible(1000));
+    let took = started.elapsed();
+    rustix::process::kill_process(pid, Signal::CONT).unwrap();
+    assert_eq!(error.code, ErrorCode::Timeout, "{error:?}");
+    assert!(
+        error.message.starts_with("after 1000 ms"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains("optimised"), "{}", error.message);
+    assert!(took < Duration::from_millis(4500), "took {took:?}");
+    assert_eq!(agent.ok(Request::Close), Reply::Closed);
+}
