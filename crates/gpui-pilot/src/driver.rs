@@ -39,7 +39,7 @@ const TYPE_CHUNK_CHARS: usize = 40;
 /// A screenshot's own budget; `REPLY_MARGIN` comes on top.
 const SCREENSHOT_BUDGET: Duration = Duration::from_secs(2);
 /// Added to the hello timeout in session mode, so a slow KWin (5 s), window (15 s) or tree
-/// (15 s) stage reports its own name rather than `stage hello`.
+/// stage (15 s plus one unanswered 2 s accessibility call) reports its own name, not `stage hello`.
 const SESSION_HELLO_EXTRA: Duration = Duration::from_secs(35);
 /// How long `close` waits for the `Closed` reply.
 const CLOSE_LIMIT: Duration = Duration::from_secs(5);

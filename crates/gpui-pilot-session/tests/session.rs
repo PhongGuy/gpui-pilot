@@ -96,6 +96,70 @@ fn settled_tree(
 }
 
 #[test]
+fn a_stopped_app_times_out_each_call_and_reads_again_once_resumed() {
+    outer("inner_stopped_app", "stopped ok");
+}
+
+/// Sends SIGCONT when dropped, so a failing assertion never leaves the demo stopped.
+struct Resume(rustix::process::Pid);
+
+impl Drop for Resume {
+    fn drop(&mut self) {
+        let _ = rustix::process::kill_process(self.0, rustix::process::Signal::CONT);
+    }
+}
+
+#[test]
+#[ignore = "runs inside the sandbox through a_stopped_app_times_out_each_call_and_reads_again_once_resumed"]
+fn inner_stopped_app() {
+    if !inner() {
+        return;
+    }
+    use rustix::process::{Pid, Signal, kill_process};
+    let mut session = Session::start(OUTPUT).unwrap();
+    let demo = Demo::spawn();
+    session
+        .wait_window(demo.pid(), Duration::from_secs(15))
+        .unwrap();
+    session
+        .place(demo.pid(), Rect::new(0., 0., 1280., 800.))
+        .unwrap();
+    let ids = |nodes: &[gpui_pilot_protocol::Node]| {
+        let mut ids: Vec<_> = nodes.iter().filter_map(|n| n.id.clone()).collect();
+        ids.sort();
+        ids
+    };
+    let before = settled_tree(&mut session, demo.pid(), |nodes| {
+        nodes.iter().any(|n| n.id.as_deref() == Some("count"))
+    });
+    let pid = Pid::from_child(&demo.child);
+    let resume = Resume(pid);
+    kill_process(pid, Signal::STOP).unwrap();
+    // Twice while stopped: the first call's queued request must not answer the second.
+    for _ in 0..2 {
+        let started = Instant::now();
+        let error = session.tree(demo.pid()).unwrap_err();
+        let took = started.elapsed();
+        assert!(
+            matches!(&error, SessionError::Unanswered(m) if m.contains("did not answer")),
+            "{error:?}"
+        );
+        assert!(
+            took < Duration::from_secs(4),
+            "a stopped app held the walk for {took:?}"
+        );
+    }
+    // Resumed, the app answers its backlog first; the next walk still reads its own replies,
+    // and the registry still lists the app.
+    drop(resume);
+    let after = settled_tree(&mut session, demo.pid(), |nodes| {
+        nodes.iter().any(|n| n.id.as_deref() == Some("count"))
+    });
+    assert_eq!(ids(&after), ids(&before));
+    println!("stopped ok");
+}
+
+#[test]
 fn the_tree_reads_ids_roles_and_logical_bounds() {
     outer("inner_tree", "tree ok");
 }

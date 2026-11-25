@@ -577,7 +577,7 @@ impl Agent {
     fn wait_stable_tree(&mut self, deadline: Instant) -> Result<(), SessionError> {
         let mut last: Option<Vec<Node>> = None;
         loop {
-            let why = match self.session.tree(self.app.pid()) {
+            let why = match self.session.tree_until(self.app.pid(), deadline) {
                 Ok(nodes) => {
                     let why = match &last {
                         Some(last) => match tree::unstable(last, &nodes) {
@@ -589,6 +589,11 @@ impl Agent {
                     last = Some(nodes);
                     why.to_owned()
                 }
+                Err(error @ SessionError::Unanswered(_)) => format!(
+                    "{error}; an app not answering at launch is usually a debug build busy \
+                     drawing every frame, which cannot answer: launch an optimised build or start \
+                     animation after launch"
+                ),
                 Err(error) => error.to_string(),
             };
             if Instant::now() >= deadline {
@@ -935,6 +940,20 @@ impl Agent {
         }
     }
 
+    /// Reads the app's tree, reading again every 50 ms while the app leaves a call unanswered,
+    /// until `deadline` (`stalled` decides); `timeout_ms` 0 is one look.
+    fn read_tree(&mut self, deadline: Instant, timeout_ms: u64) -> Result<Vec<Node>, Failure> {
+        loop {
+            match self.session.tree(self.app.pid()) {
+                Ok(nodes) => return Ok(nodes),
+                Err(error) => {
+                    stalled(error, deadline, Instant::now(), timeout_ms == 0, timeout_ms)?
+                }
+            }
+            std::thread::sleep(TICK);
+        }
+    }
+
     /// Polls the tree every 50 ms until `target` is actionable with the same bounds twice in a
     /// row, then runs `action` at its point. A point target acts at once without reading the
     /// tree; a zero timeout acts on the first success; at the deadline an unstable success is
@@ -955,7 +974,7 @@ impl Agent {
         let mut stable_since: Option<Rect> = None;
         loop {
             let expired = Instant::now() >= deadline;
-            let nodes = self.session.tree(self.app.pid())?;
+            let nodes = self.read_tree(deadline, timeout_ms)?;
             match actionable(&nodes, target, need_enabled) {
                 Ok(a) if once || expired || stable_since.as_ref() == Some(&a.node.bounds) => {
                     action(&mut self.session, self.app.pid(), a.at)?;
@@ -1004,7 +1023,7 @@ impl Agent {
         }
         let deadline = started + Duration::from_millis(timeout_ms);
         loop {
-            let nodes = self.session.tree(self.app.pid())?;
+            let nodes = self.read_tree(deadline, timeout_ms)?;
             let resolved = resolve(&nodes, &target);
             let poll = if gone {
                 gone_poll(resolved)
@@ -1041,7 +1060,7 @@ impl Agent {
                 )));
             }
             Some(target) => {
-                let nodes = self.session.tree(self.app.pid())?;
+                let nodes = self.read_tree(Instant::now(), 0)?;
                 let b = resolve(&nodes, &target).map_err(Failure::Pilot)?.bounds;
                 Rect::new(self.client.x + b.x, self.client.y + b.y, b.w, b.h)
             }
@@ -1076,7 +1095,7 @@ impl Agent {
         let settle_elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let nodes = loop {
-            let nodes = self.session.tree(self.app.pid())?;
+            let nodes = self.read_tree(deadline, timeout_ms)?;
             let Some(wanted) = &wait_for else {
                 break nodes;
             };
@@ -1174,6 +1193,26 @@ fn gone_poll(resolved: Result<Node, PilotError>) -> Poll {
     let mut timeout = PilotError::new(ErrorCode::Timeout, message);
     timeout.matches = visible;
     Poll::Pending(timeout)
+}
+
+/// What a tree read the app left unanswered means for a polling tool: `Ok` reads again after a
+/// tick, since a busy main thread may answer later. One look fails at once and the deadline
+/// ends it as `Timeout` naming the tool's timeout; a walk overrun or any other failure is final.
+fn stalled(
+    error: SessionError,
+    deadline: Instant,
+    now: Instant,
+    one_look: bool,
+    timeout_ms: u64,
+) -> Result<(), SessionError> {
+    match error {
+        SessionError::Unanswered(_) if one_look => Err(error),
+        SessionError::Unanswered(message) if now >= deadline => Err(SessionError::Timeout(
+            format!("after {timeout_ms} ms: {message} (its main thread is busy)"),
+        )),
+        SessionError::Unanswered(_) => Ok(()),
+        error => Err(error),
+    }
 }
 
 /// An `InvalidArgument` refusal with `message`.
@@ -1537,6 +1576,60 @@ mod tests {
         assert!(timeout.message.contains("gp-geom-3"), "{}", timeout.message);
         let other = request_error(SessionError::Internal("x".into()), false).unwrap();
         assert_eq!(other.code, ErrorCode::Internal);
+    }
+
+    fn unanswered() -> SessionError {
+        SessionError::Unanswered(
+            "the app did not answer an accessibility request within 2 s".into(),
+        )
+    }
+
+    #[test]
+    fn an_unanswered_read_before_the_deadline_reads_again() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+        assert!(stalled(unanswered(), later, now, false, 1000).is_ok());
+    }
+
+    #[test]
+    fn an_unanswered_read_at_the_deadline_times_out_without_launch_advice() {
+        let now = Instant::now();
+        match stalled(unanswered(), now, now, false, 1000) {
+            Err(SessionError::Timeout(m)) => {
+                assert!(m.starts_with("after 1000 ms: "), "{m}");
+                assert!(m.contains("did not answer"), "{m}");
+                assert!(!m.contains("optimised") && !m.contains("launch"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_look_fails_an_unanswered_read_at_once() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+        match stalled(unanswered(), later, now, true, 0) {
+            Err(SessionError::Unanswered(m)) => assert!(!m.contains("optimised"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_overrun_or_another_failure_is_never_read_again() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+        let overrun = SessionError::Timeout(
+            "reading the accessibility tree passed its deadline after 3 nodes".into(),
+        );
+        assert!(matches!(
+            stalled(overrun, later, now, false, 1000),
+            Err(SessionError::Timeout(m)) if m.contains("passed its deadline")
+        ));
+        let other = SessionError::Internal("x".into());
+        assert!(matches!(
+            stalled(other, later, now, false, 1000),
+            Err(SessionError::Internal(_))
+        ));
     }
 
     /// Sends one hello at `refresh_hz` through a socket pair and runs the agent's handshake.

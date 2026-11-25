@@ -491,9 +491,19 @@ impl Session {
     /// The app's accessible nodes below its application object, sorted by top, left, then
     /// path. `LaunchFailed` (stage `atspi`) when no application on the bus belongs to `pid`.
     pub fn tree(&mut self, pid: u32) -> Result<Vec<Node>, SessionError> {
+        self.tree_until(pid, Instant::now() + crate::tree::WALK_LIMIT)
+    }
+
+    /// The app's accessible nodes, as `tree`, read by `min(deadline, now + WALK_LIMIT)`.
+    /// `Unanswered` when a call goes unanswered for `CALL_LIMIT`, `Timeout` when the walk passes
+    /// its deadline.
+    pub fn tree_until(&mut self, pid: u32, deadline: Instant) -> Result<Vec<Node>, SessionError> {
         let a11y = self.a11y.clone();
         let scale = self.output.scale;
-        crate::tree::walk(&a11y, pid, scale, || self.window(pid).map(|g| g.content()))
+        let deadline = deadline.min(Instant::now() + crate::tree::WALK_LIMIT);
+        crate::tree::walk(&a11y, pid, scale, deadline, || {
+            self.window(pid).map(|g| g.content())
+        })
     }
 
     /// Captures the whole output at native resolution.
@@ -859,8 +869,11 @@ impl Session {
             .ok()?;
         // Qt reports logical extents, so the dialog's tree is read at scale 1 (spike §3).
         let a11y = self.a11y.clone();
-        let nodes =
-            crate::tree::walk(&a11y, pid, 1.0, || self.window(pid).map(|g| g.content())).ok()?;
+        let deadline = std::time::Instant::now() + crate::tree::WALK_LIMIT;
+        let nodes = crate::tree::walk(&a11y, pid, 1.0, deadline, || {
+            self.window(pid).map(|g| g.content())
+        })
+        .ok()?;
         let mut edits = nodes.iter().filter(|n| {
             n.id.as_deref()
                 .is_some_and(|id| id.ends_with(LOCATION_EDIT))
@@ -1308,7 +1321,10 @@ fn connect_a11y(bus: &Connection) -> Result<Connection, SessionError> {
         .body()
         .deserialize()
         .map_err(atspi)?;
+    // Every call on this connection gives up after `CALL_LIMIT`, so an app that stops
+    // answering fails a walk within seconds instead of the bus's own 25 s reply timeout.
     let a11y = zbus::blocking::connection::Builder::address(address.as_str())
+        .map(|builder| builder.method_timeout(crate::tree::CALL_LIMIT))
         .and_then(|builder| builder.build())
         .map_err(atspi)?;
     let owned = wait_for(START_TIMEOUT, || {
