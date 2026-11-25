@@ -125,8 +125,10 @@ pub fn a11y_only(
             };
             groups.insert(id, prefix);
         }
+        // An authored row is left to `authored`, but still counts above so no number shifts.
         if node.role() == Role::ListItem
             && !known.contains_key(&id)
+            && !is_authored(node, id, &known)
             && let Some(group) = parent
             && let (Some(prefix), Some(g)) = (groups.get(&group), nodes.get(&group))
         {
@@ -934,5 +936,63 @@ mod tests {
         assert_eq!(found[0].layer, layering.of(NodeId(501)));
         assert!(found[1].layer.unwrap().rank > found[0].layer.unwrap().rank);
         assert_eq!(found[1].layer.unwrap().overlay, Some(pop));
+    }
+
+    fn authored_item(author: &str, r: Rect) -> Node {
+        let mut n = item(r);
+        n.set_author_id(author);
+        n
+    }
+
+    #[test]
+    fn an_authored_list_item_is_left_to_the_authored_pass_but_keeps_its_number() {
+        let list = NodeId(100);
+        let update = tree(
+            vec![list],
+            vec![
+                (NodeId(101), authored_item("row-a", rect(0., 0., 200., 20.))),
+                (NodeId(102), item(rect(0., 20., 200., 40.))),
+                (
+                    list,
+                    group(
+                        Role::List,
+                        rect(0., 0., 200., 100.),
+                        vec![NodeId(101), NodeId(102)],
+                    ),
+                ),
+            ],
+        );
+        assert_eq!(
+            names(&rows(&update, &[], 1.0)),
+            [vec!["a11y-list-1".to_string(), "a11y-listitem-2".into()]]
+        );
+        assert_eq!(
+            names(&shapes(&update, &[], 1.0)),
+            [vec!["row-a".to_string()]]
+        );
+    }
+
+    #[test]
+    fn a_list_holding_only_authored_rows_still_takes_its_list_number() {
+        let (l1, l2) = (NodeId(100), NodeId(200));
+        let update = tree(
+            vec![l1, l2],
+            vec![
+                (NodeId(101), authored_item("row-a", rect(0., 0., 100., 20.))),
+                (NodeId(201), item(rect(100., 0., 200., 20.))),
+                (
+                    l1,
+                    group(Role::List, rect(0., 0., 100., 100.), vec![NodeId(101)]),
+                ),
+                (
+                    l2,
+                    group(Role::List, rect(100., 0., 200., 100.), vec![NodeId(201)]),
+                ),
+            ],
+        );
+        assert_eq!(
+            names(&rows(&update, &[], 1.0)),
+            [vec!["a11y-list-2".to_string(), "a11y-listitem-1".into()]]
+        );
     }
 }
