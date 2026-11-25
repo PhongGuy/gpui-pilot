@@ -13,7 +13,7 @@ use gpui_kit::{AppContext as _, Bounds, ElementId, Pixels, Point, point, px};
 use gpui_pilot_host::Pilot;
 use gpui_pilot_host::{click_events, dispatch_events, node_id, settle};
 use gpui_pilot_protocol::{
-    MouseButton, Node as WireNode, Outcome, Reply, Request, Segment, Target,
+    ErrorCode, MouseButton, Node as WireNode, Outcome, Reply, Request, Segment, Target,
 };
 
 /// The board's leaves in push order: shapes bottom to top, then their handles.
@@ -318,4 +318,39 @@ fn the_default_demo_lists_each_author_id_button_once() {
     ] {
         named(&nodes, name);
     }
+}
+
+#[test]
+fn a_covered_frame_shape_is_clicked_on_its_uncovered_rim() {
+    let (outcome, frame, label) = with_demo(640., 400., 1.0, |mut h| async move {
+        open_board(&mut h).await;
+        let pilot = Pilot::new(h.platform.clone());
+        let outcome = pilot.handle(click(id("shape-1"), 1000), &mut h.cx).await;
+        (outcome, selected(&h, "shape-1"), selected(&h, "label-1"))
+    });
+    assert!(
+        matches!(outcome, Outcome::Ok(Reply::Click { .. })),
+        "{outcome:?}"
+    );
+    assert!(frame, "the click landed on the frame's rim");
+    assert!(
+        !label,
+        "the label drawn over the frame's centre was not hit"
+    );
+}
+
+#[test]
+fn a_fully_covered_shape_is_occluded_by_the_shape_drawn_over_it() {
+    let (outcome, under, over) = with_demo(640., 400., 1.0, |mut h| async move {
+        open_board(&mut h).await;
+        let pilot = Pilot::new(h.platform.clone());
+        let outcome = pilot.handle(click(id("shape-3"), 200), &mut h.cx).await;
+        (outcome, selected(&h, "shape-3"), selected(&h, "shape-4"))
+    });
+    let Outcome::Err(error) = outcome else {
+        panic!("expected Occluded: {outcome:?}")
+    };
+    assert_eq!(error.code, ErrorCode::Occluded);
+    assert_eq!(error.hit.as_ref().and_then(own), Some("shape-4"));
+    assert!(!under && !over, "no input was sent");
 }

@@ -387,6 +387,8 @@ pub struct Actionable {
 
 /// Resolves `target`; an element must be visible (else `ElementNotFound`), enabled when
 /// `need_enabled` (else `Disabled`) and not under an overlay (else `Occluded`, with `hit`).
+/// An authored shape whose centre a later sibling covers is acted on at the nearest free
+/// point of a 5 x 5 grid inside its clip, and is `Occluded` by that sibling when none is free.
 pub fn actionable(
     observed: &[Observed],
     target: &Target,
@@ -430,15 +432,9 @@ pub fn actionable(
     let Bounds { origin, size } = target.bounds;
     let cx = f32::from(origin.x) + f32::from(size.width) / 2.0;
     let cy = f32::from(origin.y) + f32::from(size.height) / 2.0;
-    let found = candidates(observed, cx, cy);
-
-    // The overlay the target lives in sits on top of everything larger; a smaller overlay
-    // outside the target's own subtree is drawn over it and takes the input.
-    let owner = smallest(overlays(&found).filter(|o| inside(o, target)));
-    let occluder = smallest(overlays(&found).filter(|o| {
-        !inside(o, target) && !inside(target, o) && owner.is_none_or(|owner| area(o) < area(owner))
-    }));
-    if let Some(occluder) = occluder {
+    let mut at = point(px(cx), px(cy));
+    let mut found = candidates(observed, cx, cy);
+    if let Some(occluder) = occluder(&found, target) {
         let hit =
             deepest(found.iter().copied().filter(|o| inside(occluder, o))).unwrap_or(occluder);
         let mut error = PilotError::new(
@@ -448,12 +444,83 @@ pub fn actionable(
         error.hit = Some(node_of(hit));
         return Err(error);
     }
+
+    // A canvas shape drawn under a later sibling takes the input only where nothing covers
+    // it, so a covered centre moves to the nearest grid point left free and inside the clip.
+    if let Some(authored) = target.authored
+        && let Some(over) = cover(observed, target, authored, at)
+    {
+        let free = grid(target.bounds)
+            .into_iter()
+            .filter(|p| {
+                authored.clip.contains(p) && cover(observed, target, authored, *p).is_none()
+            })
+            .map(|p| (p, candidates(observed, f32::from(p.x), f32::from(p.y))))
+            .find(|(_, found)| occluder(found, target).is_none());
+        let Some((free, there)) = free else {
+            let mut error = PilotError::new(
+                ErrorCode::Occluded,
+                "a shape drawn over the target covers it; the input would reach the reported hit",
+            );
+            error.hit = Some(node_of(over));
+            return Err(error);
+        };
+        (at, found) = (free, there);
+    }
     let hit = topmost(found.iter().copied().filter(|o| inside(target, o))).unwrap_or(target);
     Ok(Actionable {
         node: node_of(target),
-        at: point(px(cx), px(cy)),
+        at,
         hit: node_of(hit),
     })
+}
+
+/// The overlay drawn over `target` among the elements under one point, if any.
+fn occluder<'a>(found: &[&'a Observed], target: &Observed) -> Option<&'a Observed> {
+    // The overlay the target lives in sits on top of everything larger; a smaller overlay
+    // outside the target's own subtree is drawn over it and takes the input.
+    let owner = smallest(overlays(found).filter(|o| inside(o, target)));
+    smallest(overlays(found).filter(|o| {
+        !inside(o, target) && !inside(target, o) && owner.is_none_or(|owner| area(o) < area(owner))
+    }))
+}
+
+/// The highest-ranked authored sibling drawn after `target` whose bounds contain `at`.
+fn cover<'a>(
+    observed: &'a [Observed],
+    target: &Observed,
+    authored: Authored,
+    at: Point<Pixels>,
+) -> Option<&'a Observed> {
+    let rank = target.layer?.rank;
+    observed
+        .iter()
+        .filter(|o| o.visible && o.bounds.contains(&at))
+        .filter(|o| o.authored.is_some_and(|a| a.parent == authored.parent))
+        .filter_map(|o| Some((o.layer?.rank, o)))
+        .filter(|(r, _)| *r > rank)
+        .max_by_key(|(r, _)| *r)
+        .map(|(_, o)| o)
+}
+
+/// The 5 x 5 grid of cell centres in `b`, nearest the centre first, row-major on a tie.
+fn grid(b: Bounds<Pixels>) -> Vec<Point<Pixels>> {
+    let (x, y) = (f32::from(b.origin.x), f32::from(b.origin.y));
+    let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+    // Offsets are exact negations of one another, so mirrored points tie exactly and the
+    // stable sort keeps row-major order.
+    let mut points: Vec<(f32, Point<Pixels>)> = (0..5)
+        .flat_map(|j| (0..5).map(move |i| (i, j)))
+        .map(|(i, j)| {
+            let (dx, dy) = ((i as f32 - 2.) * w / 5., (j as f32 - 2.) * h / 5.);
+            (
+                dx * dx + dy * dy,
+                point(px(x + w / 2. + dx), px(y + h / 2. + dy)),
+            )
+        })
+        .collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    points.into_iter().map(|(_, p)| p).collect()
 }
 
 /// The visible elements whose bounds contain the point, in node order.
@@ -1229,5 +1296,111 @@ mod tests {
         let under = actionable(&seen, &id_target(&["under"]), true).unwrap();
         assert_eq!(last(&under.node), Some(&Segment::Str("under".into())));
         assert_eq!(last(&under.hit), Some(&Segment::Str("under".into())));
+    }
+
+    use gpui_kit::accesskit::NodeId;
+
+    fn shape(own: &str, x: f32, y: f32, w: f32, h: f32, rank: u32, parent: u64) -> Observed {
+        let mut o = ranked(sized(vec![name("board"), name(own)], x, y, w, h), rank);
+        let screen = bounds(point(px(0.), px(0.)), size(px(1000.), px(1000.)));
+        o.authored = Some(Authored::new(NodeId(parent), screen));
+        o
+    }
+
+    fn at_of(seen: &[Observed], own: &str) -> (f32, f32) {
+        let a = actionable(seen, &id_target(&[own]), true).unwrap();
+        (f32::from(a.at.x), f32::from(a.at.y))
+    }
+
+    #[test]
+    fn an_uncovered_shape_is_acted_on_at_its_centre() {
+        let seen = vec![
+            shape("a", 0., 0., 100., 100., 1, 1),
+            shape("b", 200., 0., 50., 50., 2, 1),
+        ];
+        assert_eq!(at_of(&seen, "a"), (50., 50.));
+        let hit = actionable(&seen, &id_target(&["a"]), true).unwrap().hit;
+        assert_eq!(last(&hit), Some(&Segment::Str("a".into())));
+    }
+
+    #[test]
+    fn a_centre_covered_by_a_later_sibling_moves_to_the_nearest_uncovered_grid_point() {
+        // Grid x and y are 10, 30, 50, 70, 90; the cover takes 30..70 both ways. Four points tie
+        // at 40 px from the centre, and row-major order picks the top one.
+        let seen = vec![
+            shape("a", 0., 0., 100., 100., 1, 1),
+            shape("cover", 20., 20., 60., 60., 2, 1),
+        ];
+        assert_eq!(at_of(&seen, "a"), (50., 10.));
+        let hit = actionable(&seen, &id_target(&["a"]), true).unwrap().hit;
+        assert_eq!(last(&hit), Some(&Segment::Str("a".into())));
+    }
+
+    #[test]
+    fn a_shape_covered_everywhere_is_occluded_with_the_cover_as_hit() {
+        let seen = vec![
+            shape("a", 0., 0., 100., 100., 1, 1),
+            shape("cover", 0., 0., 100., 100., 2, 1),
+        ];
+        let error = actionable(&seen, &id_target(&["a"]), true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Occluded);
+        assert_eq!(
+            error.hit.as_ref().and_then(|h| h.path.last()),
+            Some(&Segment::Str("cover".into()))
+        );
+    }
+
+    #[test]
+    fn an_earlier_sibling_never_covers() {
+        let seen = vec![
+            shape("under", 20., 20., 60., 60., 1, 1),
+            shape("a", 0., 0., 100., 100., 2, 1),
+        ];
+        assert_eq!(at_of(&seen, "a"), (50., 50.));
+    }
+
+    #[test]
+    fn a_grid_point_outside_the_clip_is_skipped() {
+        let mut a = shape("a", 0., 0., 100., 100., 1, 1);
+        a.authored = Some(Authored::new(
+            NodeId(1),
+            bounds(point(px(0.), px(20.)), size(px(100.), px(80.))),
+        ));
+        let seen = vec![a, shape("cover", 20., 20., 60., 60., 2, 1)];
+        assert_eq!(at_of(&seen, "a"), (10., 50.));
+    }
+
+    #[test]
+    fn a_shape_under_another_parent_never_covers_even_with_the_same_path_prefix() {
+        // Two unregistered boards under one known ancestor: both rows read `board/<id>`.
+        let seen = vec![
+            shape("a", 0., 0., 100., 100., 1, 1),
+            shape("cover", 0., 0., 100., 100., 2, 2),
+        ];
+        assert_eq!(at_of(&seen, "a"), (50., 50.));
+    }
+
+    #[test]
+    fn a_grid_point_under_an_overlay_is_skipped_and_the_hit_is_taken_at_the_chosen_point() {
+        // The overlay sits on (50, 10), the first fallback; (10, 50) is next, where `mark`
+        // (inside the target, longer path) is the hit, though it is not under the centre.
+        let seen = vec![
+            shape("a", 0., 0., 100., 100., 1, 1),
+            shape("cover", 20., 20., 60., 60., 2, 1),
+            with_role(sized(vec![name("pop")], 40., 0., 20., 15.), Role::Dialog),
+            ranked(
+                sized(
+                    vec![name("board"), name("a"), name("mark")],
+                    0.,
+                    40.,
+                    20.,
+                    20.,
+                ),
+                1,
+            ),
+        ];
+        assert_eq!(at_of(&seen, "a"), (10., 50.));
+        let hit = actionable(&seen, &id_target(&["a"]), true).unwrap().hit;
+        assert_eq!(last(&hit), Some(&Segment::Str("mark".into())));
     }
 }
