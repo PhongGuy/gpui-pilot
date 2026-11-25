@@ -96,6 +96,8 @@ pub fn at_point(target: &Target) -> Option<Actionable> {
 
 /// `resolve`, then: a hidden node is `ElementNotFound` ("the target matches only a hidden
 /// element"), and a disabled one is `Disabled` when `need_enabled`; `at` is the bounds centre.
+/// An id-carrying leaf under a `Canvas` instead takes the nearest point strictly inside the
+/// canvas that no later id-carrying leaf sibling covers, else `Occluded` (see `canvas_point`).
 /// A point target goes through `at_point` instead.
 pub fn actionable(
     nodes: &[Node],
@@ -116,10 +118,108 @@ pub fn actionable(
         ));
     }
     let Rect { x, y, w, h, .. } = node.bounds;
-    Ok(Actionable {
-        at: (x + w / 2.0, y + h / 2.0),
-        node,
+    let at = canvas_point(nodes, &node, (x + w / 2.0, y + h / 2.0))?;
+    Ok(Actionable { at, node })
+}
+
+/// The AT-SPI role accesskit's `Role::Canvas` reads as; its id-carrying leaves are shapes.
+const CANVAS: &str = "Canvas";
+
+/// Where to act on `target` when it is a shape: an id-carrying leaf under a non-empty
+/// `Canvas`. Shapes later in push order (higher child index) are drawn over earlier ones and
+/// the canvas clips them all, so try the centre, then the grid, for a point inside the canvas
+/// that no later shape covers. Any other target keeps `centre`.
+fn canvas_point(
+    nodes: &[Node],
+    target: &Node,
+    centre: (f32, f32),
+) -> Result<(f32, f32), PilotError> {
+    let Some((Segment::Int(index), parent)) = target.path.split_last() else {
+        return Ok(centre);
+    };
+    let canvas = nodes
+        .iter()
+        .find(|n| n.path == parent && n.role.as_deref() == Some(CANVAS));
+    let Some(clip) = canvas.map(|c| &c.bounds) else {
+        return Ok(centre);
+    };
+    if clip.w <= 0. || clip.h <= 0. || !is_shape(nodes, target) {
+        return Ok(centre);
+    }
+    let later: Vec<(u64, &Node)> = nodes
+        .iter()
+        .filter(|n| n.visible && n.path.len() == target.path.len() && n.path.starts_with(parent))
+        .filter_map(|n| match n.path.last() {
+            Some(Segment::Int(i)) if i > index => Some((*i, n)),
+            _ => None,
+        })
+        .filter(|(_, n)| is_shape(nodes, n))
+        .collect();
+    let cover = |(px, py): (f32, f32)| {
+        later
+            .iter()
+            .filter(|(_, n)| contains(&n.bounds, px, py))
+            .max_by_key(|(i, _)| *i)
+            .map(|(_, n)| *n)
+    };
+    let free = |p: (f32, f32)| inside(clip, p) && cover(p).is_none();
+    if free(centre) {
+        return Ok(centre);
+    }
+    if let Some(p) = grid(&target.bounds).into_iter().find(|p| free(*p)) {
+        return Ok(p);
+    }
+    Err(match cover(centre) {
+        Some(hit) => {
+            let mut error = PilotError::new(
+                ErrorCode::Occluded,
+                "a later sibling under the canvas covers the target; the input would reach the reported hit",
+            );
+            error.hit = Some(hit.clone());
+            error
+        }
+        None => PilotError::new(
+            ErrorCode::Occluded,
+            "the target lies outside its canvas's bounds",
+        ),
     })
+}
+
+/// A leaf (no node's path extends it) with a non-empty accessible id.
+fn is_shape(nodes: &[Node], node: &Node) -> bool {
+    node.id.as_deref().is_some_and(|id| !id.is_empty())
+        && !nodes
+            .iter()
+            .any(|n| n.path.len() > node.path.len() && n.path.starts_with(&node.path))
+}
+
+/// Half-open containment, as the app's own hit test counts a shape.
+fn contains(r: &Rect, x: f32, y: f32) -> bool {
+    r.x <= x && x < r.x + r.w && r.y <= y && y < r.y + r.h
+}
+
+/// Strictly inside: a point on the canvas's edge is clipped.
+fn inside(r: &Rect, (x, y): (f32, f32)) -> bool {
+    r.x < x && x < r.x + r.w && r.y < y && y < r.y + r.h
+}
+
+/// The 5 x 5 grid of cell centres in `b`, nearest the centre first, row-major on a tie; a
+/// copy of the headless host's `grid`, which this crate cannot depend on.
+fn grid(b: &Rect) -> Vec<(f32, f32)> {
+    // Offsets are exact negations of one another, so mirrored points tie exactly and the
+    // stable sort keeps row-major order.
+    let mut points: Vec<(f32, (f32, f32))> = (0..5)
+        .flat_map(|j| (0..5).map(move |i| (i, j)))
+        .map(|(i, j)| {
+            let (dx, dy) = ((i as f32 - 2.) * b.w / 5., (j as f32 - 2.) * b.h / 5.);
+            (
+                dx * dx + dy * dy,
+                (b.x + b.w / 2. + dx, b.y + b.h / 2. + dy),
+            )
+        })
+        .collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    points.into_iter().map(|(_, p)| p).collect()
 }
 
 /// The nodes whose path starts with `root.path`, `root` included, in input order.
@@ -376,5 +476,195 @@ mod tests {
         assert_eq!(within(&all, &frame).len(), all.len());
         let count = all[1].clone();
         assert_eq!(within(&all, &count), vec![count]);
+    }
+
+    /// pilot-demo's `--board-shapes 4` board at scale 1, as the session reads it: shape-0 half
+    /// off the board's left edge, shape-3 over the centre of shape-2.
+    fn board() -> Vec<Node> {
+        let shape = |i: u64, x: f32, y: f32| {
+            let (own, label) = (format!("shape-{i}"), format!("Shape {i}"));
+            node(
+                &[0, 1, i],
+                Some(own.as_str()),
+                "Panel",
+                &label,
+                Rect::new(x, y, 160., 120.),
+            )
+        };
+        vec![
+            node(&[0], None, "Frame", "", Rect::new(0., 0., 1280., 764.)),
+            node(
+                &[0, 0],
+                None,
+                "Button",
+                "Pan",
+                Rect::new(16., 16., 1248., 32.),
+            ),
+            node(&[0, 1], None, "Canvas", "", Rect::new(16., 56., 600., 300.)),
+            shape(0, -64., 71.),
+            shape(1, 236., 71.),
+            shape(2, 436., 71.),
+            shape(3, 476., 101.),
+        ]
+    }
+
+    fn at(nodes: &[Node], own: &str) -> (f32, f32) {
+        actionable(nodes, &id(own), true).unwrap().at
+    }
+
+    #[test]
+    fn an_uncovered_shape_inside_its_board_is_acted_on_at_its_centre() {
+        assert_eq!(at(&board(), "shape-1"), (316., 131.));
+    }
+
+    #[test]
+    fn a_centre_covered_by_a_later_sibling_moves_to_the_nearest_uncovered_grid_point() {
+        // shape-2's grid: x 452, 484, 516, 548, 580; y 83, 107, 131, 155, 179. shape-3 covers
+        // x >= 476 and y >= 101, so the nearest free point is straight above the centre.
+        assert_eq!(at(&board(), "shape-2"), (516., 83.));
+    }
+
+    #[test]
+    fn an_earlier_sibling_never_covers() {
+        assert_eq!(at(&board(), "shape-3"), (556., 161.));
+    }
+
+    #[test]
+    fn a_centre_on_the_boards_edge_moves_inside_the_board() {
+        // shape-0's centre is on the board's left edge (x 16); its grid x are -48, -16, 16, 48
+        // and 80, and 48 is the nearest strictly inside.
+        assert_eq!(at(&board(), "shape-0"), (48., 131.));
+    }
+
+    #[test]
+    fn a_shape_covered_everywhere_is_occluded_with_the_cover_as_hit() {
+        let mut all = board();
+        all[6].bounds = all[5].bounds.clone();
+        let error = actionable(&all, &id("shape-2"), true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Occluded);
+        assert_eq!(error.hit.and_then(|h| h.id).as_deref(), Some("shape-3"));
+    }
+
+    #[test]
+    fn a_shape_outside_its_board_is_occluded_without_a_hit() {
+        let mut all = board();
+        // Grid x -184, -152, -120, -88 and -56: every point left of the board.
+        all[3].bounds = Rect::new(-200., 71., 160., 120.);
+        let error = actionable(&all, &id("shape-0"), true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Occluded);
+        assert!(error.hit.is_none(), "{error:?}");
+        assert!(error.message.contains("outside"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_sibling_with_children_never_covers() {
+        let mut all = board();
+        all.push(node(
+            &[0, 1, 3, 0],
+            None,
+            "Label",
+            "",
+            Rect::new(480., 105., 20., 10.),
+        ));
+        assert_eq!(at(&all, "shape-2"), (516., 131.));
+    }
+
+    #[test]
+    fn a_target_with_children_keeps_its_centre() {
+        let mut all = board();
+        all.push(node(
+            &[0, 1, 2, 0],
+            None,
+            "Label",
+            "",
+            Rect::new(440., 75., 20., 10.),
+        ));
+        assert_eq!(at(&all, "shape-2"), (516., 131.));
+    }
+
+    #[test]
+    fn a_leaf_under_another_parent_never_covers() {
+        let mut all = board();
+        all[6].path = vec![Segment::Int(0), Segment::Int(2), Segment::Int(0)];
+        all.push(node(
+            &[0, 2],
+            None,
+            "Canvas",
+            "",
+            Rect::new(16., 56., 1248., 300.),
+        ));
+        assert_eq!(at(&all, "shape-2"), (516., 131.));
+    }
+
+    #[test]
+    fn a_hidden_sibling_never_covers() {
+        let mut all = board();
+        all[6].visible = false;
+        assert_eq!(at(&all, "shape-2"), (516., 131.));
+    }
+
+    #[test]
+    fn overlapping_id_leaves_under_a_panel_keep_their_centres() {
+        // Only a Canvas parent triggers the rule: ordinary layout is acted on as before.
+        let mut all = board();
+        all.push(node(
+            &[0, 2],
+            None,
+            "Panel",
+            "",
+            Rect::new(700., 400., 300., 200.),
+        ));
+        all.push(node(
+            &[0, 2, 0],
+            Some("chip-a"),
+            "Button",
+            "A",
+            Rect::new(700., 400., 100., 100.),
+        ));
+        all.push(node(
+            &[0, 2, 1],
+            Some("chip-b"),
+            "Button",
+            "B",
+            Rect::new(700., 400., 100., 100.),
+        ));
+        assert_eq!(at(&all, "chip-a"), (750., 450.));
+    }
+
+    #[test]
+    fn a_zero_size_canvas_skips_the_rule_and_clicks_the_centre() {
+        let mut all = board();
+        all[2].bounds = Rect::new(16., 56., 0., 300.);
+        assert_eq!(at(&all, "shape-2"), (516., 131.));
+        assert_eq!(at(&all, "shape-0"), (16., 131.));
+    }
+
+    #[test]
+    fn an_id_carrying_label_under_the_canvas_covers_a_shape() {
+        // Accepted: a real leaf with an id on the board is treated as a shape.
+        let mut all = board();
+        all.push(node(
+            &[0, 1, 4],
+            Some("caption"),
+            "Label",
+            "Caption",
+            Rect::new(236., 71., 160., 120.),
+        ));
+        let error = actionable(&all, &id("shape-1"), true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Occluded);
+        assert_eq!(error.hit.and_then(|h| h.id).as_deref(), Some("caption"));
+    }
+
+    #[test]
+    fn a_leaf_without_an_id_never_covers() {
+        let mut all = board();
+        all.push(node(
+            &[0, 1, 4],
+            None,
+            "Label",
+            "Caption",
+            Rect::new(236., 71., 160., 120.),
+        ));
+        assert_eq!(at(&all, "shape-1"), (316., 131.));
     }
 }

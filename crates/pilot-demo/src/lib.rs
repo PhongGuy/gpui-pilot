@@ -5,7 +5,7 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::base::Root;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -115,6 +115,35 @@ fn board_shapes() -> Vec<Shape> {
     ]
 }
 
+/// `n` (at least 3) shapes on a grid over the board, for `--board-shapes <n>`: the last covers
+/// the centre of the one before it, and the first sits half off the board's left edge. Ids and
+/// labels are leaked once at startup, since `Shape` holds `'static` strings.
+pub fn grid_shapes(n: usize) -> Vec<Shape> {
+    let n = n.max(3);
+    let cols = ((n as f32 * 2.).sqrt().ceil() as usize).max(1);
+    let rows = n.div_ceil(cols);
+    let (cw, ch) = (600. / cols as f32, 300. / rows as f32);
+    let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    let mut shapes: Vec<Shape> = (0..n)
+        .map(|i| Shape {
+            id: leak(format!("shape-{i}")),
+            label: leak(format!("Shape {i}")),
+            role: Role::Group,
+            x: (i % cols) as f32 * cw + cw * 0.1,
+            y: (i / cols) as f32 * ch + ch * 0.1,
+            w: cw * 0.8,
+            h: ch * 0.8,
+            selected: false,
+            handle: None,
+        })
+        .collect();
+    shapes[0].x = -shapes[0].w / 2.;
+    let (under, last) = (shapes[n - 2].clone(), n - 1);
+    shapes[last].x = under.x + under.w / 4.;
+    shapes[last].y = under.y + under.h / 4.;
+    shapes
+}
+
 /// Rows in the `--list` fixture, enough that a notch never reaches its end.
 pub const LIST_ROWS: usize = 10_000;
 
@@ -182,6 +211,12 @@ pub struct DemoView {
     pub board: bool,
     pub shapes: Vec<Shape>,
     pub pan: (f32, f32),
+    /// On `--board-shapes <n>`, the board clips its children. On `--board-autopan` the `pan`
+    /// button instead starts panning the shapes on every frame, from `board_autopan`;
+    /// `--board-autopan-now` pans from the first frame.
+    board_clip: bool,
+    board_autopan_armed: bool,
+    board_autopan: Option<Instant>,
     resizing: Option<usize>,
     board_origin: Rc<Cell<gpui_kit::Point<Pixels>>>,
     /// On `--popover`, the window shows only a click-opened kit popover over observed rows.
@@ -329,6 +364,9 @@ impl DemoView {
             board: false,
             shapes: board_shapes(),
             pan: (0., 0.),
+            board_clip: false,
+            board_autopan_armed: false,
+            board_autopan: None,
             resizing: None,
             board_origin: Rc::new(Cell::new(gpui_kit::Point::default())),
             popover: false,
@@ -377,8 +415,9 @@ impl DemoView {
         self.persist = Some(path);
     }
 
-    /// Applies the `--list`, `--popover`, `--context-menu` and `--secret` flags and the `--dir <path>`,
-    /// `--fetch <url>`, `--render-delay-ms <n>`, `--late-paint-ms <n>`, `--ticker-ms <n>` and
+    /// Applies the `--list`, `--popover`, `--board`, `--board-autopan`, `--board-autopan-now`,
+    /// `--context-menu` and `--secret` flags and the `--dir <path>`, `--fetch <url>`,
+    /// `--board-shapes <n>`, `--render-delay-ms <n>`, `--late-paint-ms <n>`, `--ticker-ms <n>` and
     /// `--ticker-heavy <n>` pairs from `args`;
     /// unknown args are ignored.
     pub fn configure(&mut self, args: &[String]) {
@@ -390,6 +429,15 @@ impl DemoView {
         }
         if args.iter().any(|arg| arg == "--board") {
             self.board = true;
+        }
+        if args.iter().any(|arg| arg == "--board-autopan") {
+            self.board = true;
+            self.board_autopan_armed = true;
+        }
+        if args.iter().any(|arg| arg == "--board-autopan-now") {
+            self.board = true;
+            self.board_autopan_armed = true;
+            self.board_autopan = Some(Instant::now());
         }
         if args.iter().any(|arg| arg == "--secret") {
             self.secret_form = true;
@@ -409,6 +457,13 @@ impl DemoView {
                     self.dir = Some(dir);
                 }
                 "--fetch" => self.fetch_url = Some(pair[1].clone()),
+                "--board-shapes" => {
+                    if let Ok(n) = pair[1].parse() {
+                        self.board = true;
+                        self.board_clip = true;
+                        self.shapes = grid_shapes(n);
+                    }
+                }
                 "--big-value" => {
                     let len: usize = pair[1].parse().unwrap_or(0);
                     let text: String = (0..len)
@@ -1289,7 +1344,15 @@ impl DemoView {
     /// A pan button above a canvas that publishes its shapes as synthetic accessibility leaves
     /// under the board's own node, as an app drawing on a GPUI canvas would.
     fn board_fixture(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (scale, pan) = (window.scale_factor(), self.pan);
+        let (scale, mut pan) = (window.scale_factor(), self.pan);
+        // Auto-pan sweeps 0..40 px and back every 2 s and asks for the next frame, so every
+        // vblank moves every shape; the hit test ignores it, as no test clicks while panning.
+        if let Some(start) = self.board_autopan {
+            let t = start.elapsed().as_secs_f32() % 2.;
+            let swing = 40. * (1. - (t - 1.).abs());
+            pan = (pan.0 + swing, pan.1);
+            window.request_animation_frame();
+        }
         let (shapes, painted, origin) = (
             self.shapes.clone(),
             self.shapes.clone(),
@@ -1301,7 +1364,11 @@ impl DemoView {
             .gap(px(8.))
             .child(Button::new("pan").label("Pan").on_click(cx.listener(
                 |view: &mut Self, _, _, cx| {
-                    view.pan = (view.pan.0 + 30., view.pan.1 + 20.);
+                    if view.board_autopan_armed {
+                        view.board_autopan.get_or_insert_with(Instant::now);
+                    } else {
+                        view.pan = (view.pan.0 + 30., view.pan.1 + 20.);
+                    }
                     cx.notify();
                 },
             )))
@@ -1311,6 +1378,7 @@ impl DemoView {
                     .role(Role::Canvas)
                     .test_support()
                     .relative()
+                    .when(self.board_clip, |board| board.overflow_hidden())
                     .w(px(600.))
                     .h(px(300.))
                     // Shapes are board-relative; the board's own node already holds its device

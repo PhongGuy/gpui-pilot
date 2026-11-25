@@ -653,3 +653,246 @@ async fn a_screenshot_after_a_settled_tree_shows_a_long_final_frame() {
     }
     pilot.ok("close", json!({})).await;
 }
+
+/// A session launch at scale 1, where shape extents are whole logical pixels.
+fn shapes_launch(args: &[&str]) -> Value {
+    json!({"mode": "session", "width": 1280, "height": 800, "scale": 1.0, "build": false,
+           "network": "none", "args": args})
+}
+
+/// The node in a session `tree` reply whose own accessible id is `id`.
+fn by_id(tree: &Value, id: &str) -> Value {
+    tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == json!(id))
+        .unwrap_or_else(|| panic!("no `{id}` in the tree"))
+        .clone()
+}
+
+/// How many nodes in a session `tree` reply carry a `shape-<i>` id.
+fn shapes_in(tree: &Value) -> usize {
+    tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["id"].as_str().is_some_and(|id| id.starts_with("shape-")))
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_board_panning_from_startup_still_launches() {
+    if !session_tests(Network::None) {
+        return;
+    }
+    // A debug demo panning 400 shapes from its first frame never answers AT-SPI, so the
+    // optimised build stands in for a real app, as in the spike.
+    let demo = timing_windowed();
+    require_timing_bins(&[&demo]);
+    let config = format!("[session]\nbinary = \"{}\"\n", demo.display());
+    let pilot = Pilot::start(Some(&config)).await;
+    let mut launch = shapes_launch(&["--board-shapes", "400", "--board-autopan-now"]);
+    // The pixels never settle while the board pans; only the tree's stability is under test.
+    launch["settle_ms"] = json!(0);
+    pilot.ok("launch", launch).await;
+    let mut xs = Vec::new();
+    for _ in 0..5 {
+        let tree = pilot.ok("tree", json!({"settle_ms": 0})).await;
+        assert_eq!(shapes_in(&tree), 400);
+        xs.push(by_id(&tree, "shape-0")["bounds"]["x"].as_f64().unwrap());
+    }
+    assert!(
+        xs.windows(2).any(|w| w[0] != w[1]),
+        "the shapes never moved: {xs:?}"
+    );
+    pilot.ok("close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_covered_or_clipped_shape_is_clicked_where_only_it_is_drawn() {
+    if !session_tests(Network::None) {
+        return;
+    }
+    assert!(
+        windowed().exists(),
+        "run `cargo build -p pilot-demo --bins` first"
+    );
+    for scale in [1.0, 2.0] {
+        let pilot = Pilot::start(Some(&config())).await;
+        let mut launch = shapes_launch(&["--board-shapes", "4"]);
+        launch["scale"] = json!(scale);
+        pilot.ok("launch", launch).await;
+        // shape-3 covers shape-2's centre: a centre click would select shape-3.
+        let clicked = pilot
+            .ok("click", json!({"target": {"id": ["shape-2"]}}))
+            .await;
+        assert_eq!(clicked["clicked"]["id"], json!("shape-2"), "scale {scale}");
+        let tree = pilot.ok("tree", json!({})).await;
+        assert_eq!(
+            by_id(&tree, "shape-2")["selected"],
+            json!(true),
+            "scale {scale}: {tree}"
+        );
+        assert_eq!(
+            by_id(&tree, "shape-3")["selected"],
+            json!(false),
+            "scale {scale}: {tree}"
+        );
+        // shape-0's centre is on the board's left edge, where the board clips it.
+        pilot
+            .ok("click", json!({"target": {"id": ["shape-0"]}}))
+            .await;
+        let tree = pilot.ok("tree", json!({})).await;
+        assert_eq!(
+            by_id(&tree, "shape-0")["selected"],
+            json!(true),
+            "scale {scale}: {tree}"
+        );
+        pilot.ok("close", json!({})).await;
+    }
+}
+
+fn headless_config() -> String {
+    format!(
+        "[headless]\nbinary = \"{}\"\n",
+        common::pilot_demo().display()
+    )
+}
+
+/// The node in a headless `tree` reply whose path ends in `own`.
+fn by_path_end(tree: &Value, own: &str) -> Value {
+    tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["path"].as_array().and_then(|p| p.last()) == Some(&json!(own)))
+        .unwrap_or_else(|| panic!("no `{own}` in the headless tree"))
+        .clone()
+}
+
+/// The centre of the `Pan` button in a `tree` reply, as a point target.
+fn pan_point(tree: &Value) -> Value {
+    let pan = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["role"] == json!("Button") && n["name"] == json!("Pan"))
+        .unwrap_or_else(|| panic!("no Pan button: {tree}"));
+    let b = |k: &str| pan["bounds"][k].as_f64().unwrap();
+    json!({"x": b("x") + b("w") / 2., "y": b("y") + b("h") / 2.})
+}
+
+fn assert_parity(session: &Value, headless: &Value, when: &str) {
+    for i in 0..4u64 {
+        let own = format!("shape-{i}");
+        let (s, h) = (by_id(session, &own), by_path_end(headless, &own));
+        assert_eq!(
+            s["role"],
+            json!("Panel"),
+            "{when} {own}: session roles are AT-SPI names"
+        );
+        assert_eq!(h["role"], json!("Group"), "{when} {own}");
+        assert_eq!(s["name"], h["name"], "{when} {own}");
+        assert_eq!(s["selected"], h["selected"], "{when} {own}");
+        assert_eq!(
+            s["path"].as_array().unwrap().last(),
+            Some(&json!(i)),
+            "{when} {own}: the child index is the push order"
+        );
+        for k in ["x", "y", "w", "h"] {
+            let (a, b) = (
+                s["bounds"][k].as_f64().unwrap(),
+                h["bounds"][k].as_f64().unwrap(),
+            );
+            assert!(
+                (a - b).abs() <= 1.,
+                "{when} {own} {k}: session {a}, headless {b}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_shapes_read_and_act_like_headless_ones() {
+    if !session_tests(Network::None) {
+        return;
+    }
+    assert!(
+        windowed().exists(),
+        "run `cargo build -p pilot-demo --bins` first"
+    );
+    let session = Pilot::start(Some(&config())).await;
+    let headless = Pilot::start(Some(&headless_config())).await;
+    let args = ["--board-shapes", "4"];
+    session.ok("launch", shapes_launch(&args)).await;
+    headless
+        .ok(
+            "launch",
+            json!({"mode": "headless", "width": 1280, "height": 800, "scale": 1.0,
+                   "build": false, "args": args}),
+        )
+        .await;
+    let (s, h) = (
+        session.ok("tree", json!({})).await,
+        headless.ok("tree", json!({})).await,
+    );
+    assert_parity(&s, &h, "at rest");
+    let before = by_id(&s, "shape-0")["bounds"]["x"].as_f64().unwrap();
+
+    for pilot in [&session, &headless] {
+        pilot
+            .ok("click", json!({"target": {"id": ["shape-1"]}}))
+            .await;
+    }
+    session.ok("click", json!({"target": pan_point(&s)})).await;
+    headless.ok("click", json!({"target": pan_point(&h)})).await;
+    let (s, h) = (
+        session.ok("tree", json!({})).await,
+        headless.ok("tree", json!({})).await,
+    );
+    assert_parity(&s, &h, "after a select and a pan");
+    assert_eq!(by_id(&s, "shape-1")["selected"], json!(true), "{s}");
+    let after = by_id(&s, "shape-0")["bounds"]["x"].as_f64().unwrap();
+    assert!(
+        (after - before - 30.).abs() <= 1.,
+        "the pan moved shape-0: {before} -> {after}"
+    );
+    session.ok("close", json!({})).await;
+    headless.ok("close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_tree_of_400_shapes_reads_within_its_budget() {
+    const TEST: &str = "a_session_tree_of_400_shapes_reads_within_its_budget";
+    if !session_tests(Network::None) || common::load::timing_skipped(TEST) {
+        return;
+    }
+    let (server, demo) = (timing_server(), timing_windowed());
+    require_timing_bins(&[&server, &demo]);
+    let config = format!("[session]\nbinary = \"{}\"\n", demo.display());
+    let pilot = Pilot::start_with(&server, Some(&config)).await;
+    pilot
+        .ok("launch", shapes_launch(&["--board-shapes", "400"]))
+        .await;
+    let tree = pilot.ok("tree", json!({})).await;
+    assert_eq!(shapes_in(&tree), 400);
+    // Budget above the worst 400-shape walk measured; see
+    // docs/research/2026-11-25-session-canvas-shapes.md.
+    let mut ms = Vec::new();
+    for _ in 0..10 {
+        let started = Instant::now();
+        pilot
+            .ok("tree", json!({"settle_ms": 0, "max_chars": 2000}))
+            .await;
+        ms.push(started.elapsed().as_secs_f64() * 1000.);
+    }
+    ms.sort_by(f64::total_cmp);
+    let p95 = ms[9];
+    assert!(
+        p95 <= 400.,
+        "p95 of 10 tree reads at 400 shapes is {p95:.1} ms, over 400 ms: {ms:?}; {}",
+        common::load::report()
+    );
+    pilot.ok("close", json!({})).await;
+}
