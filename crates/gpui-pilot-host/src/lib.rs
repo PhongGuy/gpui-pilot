@@ -23,10 +23,10 @@ pub use input::{
     drag_move, drag_path, drag_press, drag_release, hover_events, notch_events, parse_keys,
     scroll_events, text_keystrokes,
 };
-pub use layers::{Layer, Layering, a11y_only, node_id};
+pub use layers::{Layer, Layering, a11y_only, authored, node_id};
 pub use platform::{PathPrompt, PilotPlatform, PromptAnswered, Recorded};
 pub use resolve::{
-    Actionable, Observed, Resolved, actionable, focused_input_masked, observe, resolve,
+    Actionable, Authored, Observed, Resolved, actionable, focused_input_masked, observe, resolve,
     segment_matches, segment_of, subtree, to_nodes,
 };
 pub use server::{Launch, PilotApp, run};

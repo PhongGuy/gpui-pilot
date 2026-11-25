@@ -9,7 +9,7 @@ use gpui_kit::accesskit::{Node, NodeId, Rect, Role, TreeUpdate};
 use gpui_kit::{Bounds, ElementId, Pixels, bounds, point, px, size};
 use rustc_hash::FxHasher;
 
-use crate::resolve::{Observed, is_overlay_role};
+use crate::resolve::{Authored, Observed, is_overlay_role};
 
 /// Where an observed element sits in the paint order.
 #[non_exhaustive]
@@ -99,40 +99,16 @@ pub fn a11y_only(
     scale: f32,
     window: Bounds<Pixels>,
 ) -> Vec<Observed> {
-    // Every observed path prefix names a node GPUI may also carry; a node with one of these ids
-    // is already reported, and its prefix is the real path synthetic segments hang from.
-    let mut known: HashMap<NodeId, &[ElementId]> = HashMap::new();
-    for o in observed {
-        for len in 1..=o.path.len() {
-            known
-                .entry(node_id(&o.path[..len]))
-                .or_insert(&o.path[..len]);
-        }
-    }
+    let known = known_paths(observed);
     let nodes: HashMap<NodeId, &Node> = update.nodes.iter().map(|(id, n)| (*id, n)).collect();
     let is_row = |id: &NodeId| nodes.get(id).is_some_and(|n| n.role() == Role::ListItem);
-    let logical = |r: Rect| {
-        let s = f64::from(scale);
-        bounds(
-            point(px((r.x0 / s) as f32), px((r.y0 / s) as f32)),
-            size(px((r.width() / s) as f32), px((r.height() / s) as f32)),
-        )
-    };
 
-    // A pre-order walk carrying each node's parent and nearest known ancestor. A group (a node
-    // with an unknown ListItem child) gets its path prefix when first reached, so `k` follows
-    // pre-order; its rows then extend that prefix.
-    let root = update.tree.as_ref().map_or(NodeId(0), |tree| tree.root);
-    let mut seen = HashSet::new();
+    // A group (a node with an unknown ListItem child) gets its path prefix when first reached,
+    // so `k` follows pre-order; its rows then extend that prefix.
     let mut groups: HashMap<NodeId, Vec<ElementId>> = HashMap::new();
     let mut lists_under: HashMap<Option<NodeId>, usize> = HashMap::new();
     let mut rows = Vec::new();
-    let mut stack: Vec<(NodeId, Option<NodeId>, Option<NodeId>)> = vec![(root, None, None)];
-    while let Some((id, parent, anchor)) = stack.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        let Some(node) = nodes.get(&id) else { continue };
+    walk(update, &nodes, &known, |id, node, parent, anchor| {
         let unknown_row = |c: &NodeId| is_row(c) && !known.contains_key(c);
         if node.children().iter().any(unknown_row) {
             let prefix = match known.get(&id) {
@@ -162,9 +138,13 @@ pub fn a11y_only(
                 .unwrap_or_default();
             let mut path = prefix.clone();
             path.push(ElementId::Name(format!("a11y-listitem-{n}").into()));
-            let area = node.bounds().map_or_else(Bounds::default, logical);
+            let area = node
+                .bounds()
+                .map_or_else(Bounds::default, |r| logical(r, scale));
             let centre = area.center();
-            let in_group = g.bounds().is_none_or(|r| logical(r).contains(&centre));
+            let in_group = g
+                .bounds()
+                .is_none_or(|r| logical(r, scale).contains(&centre));
             let mut row = Observed::new(path, area);
             row.role = Some(Role::ListItem);
             row.selected = node.is_selected();
@@ -172,6 +152,106 @@ pub fn a11y_only(
             row.layer = layering.of(id);
             rows.push(row);
         }
+    });
+    rows
+}
+
+/// Author-id leaves no observed path reaches, as rows under the nearest known ancestor.
+///
+/// A row's path is that ancestor's path plus the author id, and rows come in tree pre-order,
+/// which is the app's push order. `scale` and `window` are as for [`a11y_only`].
+pub fn authored(
+    update: &TreeUpdate,
+    layering: &Layering,
+    observed: &[Observed],
+    scale: f32,
+    window: Bounds<Pixels>,
+) -> Vec<Observed> {
+    let known = known_paths(observed);
+    let nodes: HashMap<NodeId, &Node> = update.nodes.iter().map(|(id, n)| (*id, n)).collect();
+    let mut rows = Vec::new();
+    walk(update, &nodes, &known, |id, node, parent, anchor| {
+        let (Some(author), Some(parent)) = (node.author_id(), parent) else {
+            return;
+        };
+        if !is_authored(node, id, &known) {
+            return;
+        }
+        let mut path = anchor
+            .and_then(|a| known.get(&a))
+            .map_or_else(Vec::new, |p| p.to_vec());
+        path.push(ElementId::Name(author.to_string().into()));
+        let area = node
+            .bounds()
+            .map_or_else(Bounds::default, |r| logical(r, scale));
+        let centre = area.center();
+        // The parent's area bounds visibility and, cut to the window, every fallback point.
+        let parent_area = nodes
+            .get(&parent)
+            .and_then(|p| p.bounds())
+            .map(|r| logical(r, scale));
+        let mut row = Observed::new(path, area);
+        row.role = Some(node.role());
+        row.label = node.label().map(str::to_owned);
+        row.selected = node.is_selected();
+        row.visible = node.bounds().is_some()
+            && parent_area.is_none_or(|p| p.contains(&centre))
+            && window.contains(&centre);
+        row.layer = layering.of(id);
+        let clip = parent_area.map_or(window, |p| p.intersect(&window));
+        row.authored = Some(Authored::new(parent, clip));
+        rows.push(row);
+    });
+    rows
+}
+
+/// Every observed path prefix by its node id: a node with one of these ids is already
+/// reported, and its prefix is the real path synthetic segments hang from.
+fn known_paths(observed: &[Observed]) -> HashMap<NodeId, &[ElementId]> {
+    let mut known: HashMap<NodeId, &[ElementId]> = HashMap::new();
+    for o in observed {
+        for len in 1..=o.path.len() {
+            known
+                .entry(node_id(&o.path[..len]))
+                .or_insert(&o.path[..len]);
+        }
+    }
+    known
+}
+
+/// A tree rect in device pixels as logical bounds.
+fn logical(r: Rect, scale: f32) -> Bounds<Pixels> {
+    let s = f64::from(scale);
+    bounds(
+        point(px((r.x0 / s) as f32), px((r.y0 / s) as f32)),
+        size(px((r.width() / s) as f32), px((r.height() / s) as f32)),
+    )
+}
+
+/// Whether a node is an authored canvas shape: an author-id leaf no observed path reaches.
+fn is_authored(node: &Node, id: NodeId, known: &HashMap<NodeId, &[ElementId]>) -> bool {
+    node.author_id().is_some() && node.children().is_empty() && !known.contains_key(&id)
+}
+
+/// Visits each node once in pre-order from the root, with its parent and nearest known
+/// ancestor. An explicit stack, children pushed in reverse, keeps the listed order.
+fn walk<'a>(
+    update: &TreeUpdate,
+    nodes: &HashMap<NodeId, &'a Node>,
+    known: &HashMap<NodeId, &[ElementId]>,
+    mut visit: impl FnMut(NodeId, &'a Node, Option<NodeId>, Option<NodeId>),
+) {
+    let root = update.tree.as_ref().map_or(NodeId(0), |tree| tree.root);
+    let mut seen = HashSet::new();
+    let mut stack: Vec<(NodeId, Option<NodeId>, Option<NodeId>)> = vec![(root, None, None)];
+    while let Some((id, parent, anchor)) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(&node) = nodes.get(&id) else {
+            continue;
+        };
+        visit(id, node, parent, anchor);
         let below = if known.contains_key(&id) {
             Some(id)
         } else {
@@ -184,7 +264,6 @@ pub fn a11y_only(
                 .map(|&child| (child, Some(id), below)),
         );
     }
-    rows
 }
 
 /// GPUI's accesskit node id for the element at `path`: `GlobalElementId::accesskit_node_id` is
@@ -205,6 +284,7 @@ mod tests {
     use rustc_hash::FxHasher;
 
     use super::*;
+    use crate::Authored;
     use crate::Observed;
     use gpui_kit::accesskit::{Node, Role, Tree, TreeId, TreeUpdate};
     use gpui_kit::{bounds, point, px, size};
@@ -636,5 +716,223 @@ mod tests {
             found.iter().map(|o| o.visible).collect::<Vec<_>>(),
             [true, false]
         );
+    }
+
+    fn shape(author: &str, r: Rect) -> Node {
+        let mut n = Node::new(Role::Group);
+        n.set_author_id(author);
+        n.set_label(format!("{author} label"));
+        n.set_bounds(r);
+        n
+    }
+
+    fn shapes(update: &TreeUpdate, observed: &[Observed], scale: f32) -> Vec<Observed> {
+        authored(
+            update,
+            &Layering::from_update(update),
+            observed,
+            scale,
+            screen(),
+        )
+    }
+
+    fn logical(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        bounds(point(px(x), px(y)), size(px(w), px(h)))
+    }
+
+    #[test]
+    fn an_author_id_leaf_under_a_known_board_becomes_a_row() {
+        let board = node_id(&path(&["board"]));
+        let mut second = shape("shape-2", rect(400., 140., 500., 240.));
+        second.set_selected(true);
+        let update = tree(
+            vec![board],
+            vec![
+                (NodeId(500), shape("shape-1", rect(120., 140., 320., 340.))),
+                (NodeId(501), second),
+                (
+                    board,
+                    group(
+                        Role::Canvas,
+                        rect(100., 100., 700., 500.),
+                        vec![NodeId(500), NodeId(501)],
+                    ),
+                ),
+            ],
+        );
+        let known = Observed::new(path(&["board"]), logical(50., 50., 300., 200.));
+        let found = shapes(&update, &[known], 2.0);
+        assert_eq!(
+            names(&found),
+            [
+                vec!["board".to_string(), "shape-1".into()],
+                vec!["board".to_string(), "shape-2".into()]
+            ]
+        );
+        assert_eq!(found[0].role, Some(Role::Group));
+        assert_eq!(found[0].label.as_deref(), Some("shape-1 label"));
+        assert_eq!((found[0].selected, found[1].selected), (None, Some(true)));
+        assert_eq!(found[0].bounds, logical(60., 70., 100., 100.));
+        assert!(found[0].visible);
+        assert_eq!(
+            found[0].authored,
+            Some(Authored::new(board, logical(50., 50., 300., 200.)))
+        );
+        assert_eq!((found[0].value.clone(), found[0].checked), (None, None));
+    }
+
+    #[test]
+    fn known_nodes_and_containers_with_an_author_id_are_not_rows() {
+        let board = node_id(&path(&["board"]));
+        let registered = node_id(&path(&["board", "btn"]));
+        let mut container = group(Role::Group, rect(0., 0., 50., 50.), vec![NodeId(601)]);
+        container.set_author_id("box");
+        let update = tree(
+            vec![board],
+            vec![
+                (registered, shape("btn", rect(0., 0., 20., 20.))),
+                (NodeId(601), Node::new(Role::Button)),
+                (NodeId(600), container),
+                (
+                    board,
+                    group(
+                        Role::Canvas,
+                        rect(0., 0., 200., 200.),
+                        vec![registered, NodeId(600)],
+                    ),
+                ),
+            ],
+        );
+        let seen = [
+            Observed::new(path(&["board"]), logical(0., 0., 200., 200.)),
+            Observed::new(path(&["board", "btn"]), logical(0., 0., 20., 20.)),
+        ];
+        assert!(shapes(&update, &seen, 1.0).is_empty());
+    }
+
+    #[test]
+    fn a_row_hangs_from_the_nearest_known_ancestor_or_the_root() {
+        let main = node_id(&path(&["main"]));
+        let update = tree(
+            vec![main, NodeId(200)],
+            vec![
+                (NodeId(101), shape("a", rect(0., 0., 10., 10.))),
+                (
+                    NodeId(100),
+                    group(Role::Canvas, rect(0., 0., 100., 100.), vec![NodeId(101)]),
+                ),
+                (
+                    main,
+                    group(Role::Group, rect(0., 0., 400., 400.), vec![NodeId(100)]),
+                ),
+                (NodeId(201), shape("b", rect(500., 0., 510., 10.))),
+                (
+                    NodeId(200),
+                    group(Role::Canvas, rect(500., 0., 600., 100.), vec![NodeId(201)]),
+                ),
+            ],
+        );
+        let known = Observed::new(path(&["main"]), logical(0., 0., 400., 400.));
+        let found = shapes(&update, &[known], 1.0);
+        assert_eq!(
+            names(&found),
+            [vec!["main".to_string(), "a".into()], vec!["b".to_string()]]
+        );
+        // Occlusion keys on the node the shape was pushed under, not on the known ancestor.
+        assert_eq!(found[0].authored.map(|a| a.parent), Some(NodeId(100)));
+        assert_eq!(found[1].authored.map(|a| a.parent), Some(NodeId(200)));
+    }
+
+    #[test]
+    fn visibility_needs_bounds_and_a_centre_in_the_parent_and_window_at_scale_two() {
+        // Device px; the board spans logical 0..200 x 0..100. `scaled` sits at logical (160, 70),
+        // inside; compared unscaled its centre (320, 140) would fall outside.
+        let board = node_id(&path(&["board"]));
+        let other = node_id(&path(&["other"]));
+        let mut bare = Node::new(Role::Group);
+        bare.set_author_id("bare");
+        let mut unbounded = Node::new(Role::Canvas);
+        unbounded.set_children(vec![NodeId(9)]);
+        let update = tree(
+            vec![board, other],
+            vec![
+                (NodeId(11), shape("in", rect(20., 20., 60., 60.))),
+                (NodeId(12), shape("scaled", rect(300., 120., 340., 160.))),
+                (NodeId(13), shape("out", rect(380., 180., 500., 260.))),
+                (NodeId(14), bare),
+                (
+                    board,
+                    group(
+                        Role::Canvas,
+                        rect(0., 0., 400., 200.),
+                        vec![NodeId(11), NodeId(12), NodeId(13), NodeId(14)],
+                    ),
+                ),
+                (NodeId(9), shape("off", rect(2100., 0., 2140., 40.))),
+                (other, unbounded),
+            ],
+        );
+        let seen = [
+            Observed::new(path(&["board"]), logical(0., 0., 200., 100.)),
+            Observed::new(path(&["other"]), logical(0., 0., 0., 0.)),
+        ];
+        let found = shapes(&update, &seen, 2.0);
+        assert_eq!(
+            found.iter().map(|o| o.visible).collect::<Vec<_>>(),
+            [true, true, false, false, false]
+        );
+        // A parent without bounds clips to the window alone.
+        assert_eq!(found[4].authored.map(|a| a.clip), Some(screen()));
+    }
+
+    #[test]
+    fn the_clip_is_the_parent_cut_to_the_window() {
+        let board = node_id(&path(&["board"]));
+        let update = tree(
+            vec![board],
+            vec![
+                (NodeId(5), shape("edge", rect(910., 10., 950., 50.))),
+                (
+                    board,
+                    group(Role::Canvas, rect(900., 0., 1200., 400.), vec![NodeId(5)]),
+                ),
+            ],
+        );
+        let known = Observed::new(path(&["board"]), logical(900., 0., 300., 400.));
+        let found = shapes(&update, &[known], 1.0);
+        assert_eq!(
+            found[0].authored.map(|a| a.clip),
+            Some(logical(900., 0., 100., 400.))
+        );
+    }
+
+    #[test]
+    fn rows_take_their_own_rank_in_push_order_and_their_overlay() {
+        let (pop, board) = (NodeId(50), node_id(&path(&["board"])));
+        let update = tree(
+            vec![pop],
+            vec![
+                (NodeId(501), shape("low", rect(0., 0., 10., 10.))),
+                (NodeId(502), shape("high", rect(0., 0., 10., 10.))),
+                (
+                    board,
+                    group(
+                        Role::Canvas,
+                        rect(0., 0., 100., 100.),
+                        vec![NodeId(501), NodeId(502)],
+                    ),
+                ),
+                (
+                    pop,
+                    group(Role::Dialog, rect(0., 0., 300., 300.), vec![board]),
+                ),
+            ],
+        );
+        let layering = Layering::from_update(&update);
+        let known = Observed::new(path(&["board"]), logical(0., 0., 100., 100.));
+        let found = authored(&update, &layering, &[known], 1.0, screen());
+        assert_eq!(found[0].layer, layering.of(NodeId(501)));
+        assert!(found[1].layer.unwrap().rank > found[0].layer.unwrap().rank);
+        assert_eq!(found[1].layer.unwrap().overlay, Some(pop));
     }
 }

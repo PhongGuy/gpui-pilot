@@ -5,6 +5,7 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::HashMap;
 
 use crate::layers::Layer;
+use gpui_kit::accesskit::NodeId;
 use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
 use gpui_kit::{Bounds, ElementId, Pixels, Point, Role, Window, point, px};
 use gpui_pilot_protocol::{ErrorCode, Node, PilotError, Rect, Segment, Target};
@@ -42,6 +43,23 @@ pub struct Observed {
     pub disabled: Option<bool>,
     /// Paint order, set only while the executor resolves a target against a tree.
     pub layer: Option<Layer>,
+    /// Set only on a canvas shape read from an author-id accessibility leaf.
+    pub authored: Option<Authored>,
+}
+
+/// Where an authored canvas row sits: the accesskit node it was pushed under, and the area
+/// its fallback points must lie in.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Authored {
+    pub parent: NodeId,
+    pub clip: Bounds<Pixels>,
+}
+
+impl Authored {
+    pub fn new(parent: NodeId, clip: Bounds<Pixels>) -> Self {
+        Self { parent, clip }
+    }
 }
 
 impl Observed {
@@ -59,6 +77,7 @@ impl Observed {
             expanded: None,
             disabled: None,
             layer: None,
+            authored: None,
         }
     }
 }
@@ -107,6 +126,7 @@ pub fn observe(window: &Window) -> Vec<Observed> {
                 expanded: semantics.expanded(),
                 disabled: semantics.disabled(),
                 layer: None,
+                authored: None,
             }
         })
         .collect()
