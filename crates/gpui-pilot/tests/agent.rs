@@ -1060,3 +1060,35 @@ fn resize_changes_the_window_geometry_and_the_capture() {
     assert_eq!(viewport.name.as_deref(), Some("Viewport 960x600"));
     assert_eq!(agent.ok(Request::Close), Reply::Closed);
 }
+
+#[test]
+fn frames_with_a11y_are_unsupported_in_session_mode_and_start_nothing() {
+    if !session_tests() {
+        return;
+    }
+    let (mut agent, _) = Agent::start(PROTOCOL_VERSION);
+    agent.wait_state("opened");
+    let error = agent.err(Request::FramesStart {
+        idle_ms: 100,
+        a11y: true,
+    });
+    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert!(
+        error.message.starts_with("a11y frames are headless only"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        agent.err(Request::FramesStop).code,
+        ErrorCode::InvalidArgument,
+        "the refusal started no recording"
+    );
+    assert!(matches!(
+        agent.ok(Request::FramesStart {
+            idle_ms: 100,
+            a11y: false,
+        }),
+        Reply::FramesStarted { .. }
+    ));
+    assert!(matches!(agent.ok(Request::FramesStop), Reply::Frames(_)));
+}
