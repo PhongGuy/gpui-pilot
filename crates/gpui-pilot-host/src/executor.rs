@@ -20,10 +20,10 @@ use image::{ImageFormat, imageops};
 
 use crate::{
     Actionable, Dialog, Frame, Layering, MAX_NOTCHES, NOTCH_MS_RANGE, Observed, PathPrompt,
-    PilotPlatform, PilotWindow, PromptAnswered, Resolved, a11y_only, actionable, click_events,
-    dispatch_events, dispatch_keystrokes, drag_move, drag_path, drag_press, drag_release,
-    focused_input_masked, hover_events, notch_events, observe, parse_keys, resolve, scroll_events,
-    settle, subtree, text_keystrokes, to_nodes,
+    PilotPlatform, PilotWindow, PromptAnswered, Resolved, a11y_only, actionable, authored,
+    click_events, dispatch_events, dispatch_keystrokes, drag_move, drag_path, drag_press,
+    drag_release, focused_input_masked, hover_events, notch_events, observe, parse_keys, resolve,
+    scroll_events, settle, subtree, text_keystrokes, to_nodes,
 };
 
 /// How often `tree` re-reads the snapshots while it waits for its target.
@@ -761,7 +761,8 @@ fn on_window<T>(
 }
 
 /// Ticks inactive, draws one frame with accessibility on, then in one update observes the
-/// snapshots, ranks them, appends `a11y_only` rows, turns accessibility off and runs `f`.
+/// snapshots, ranks them, appends `a11y_only` and `authored` rows (both read against the
+/// snapshots alone), turns accessibility off and runs `f`.
 /// Without a tree the snapshots pass through unranked.
 fn observe_with_a11y<R>(
     window: &PilotWindow,
@@ -787,7 +788,9 @@ fn observe_with_a11y<R>(
             // window's own area, never its place on the screen.
             let area = Bounds::new(point(px(0.), px(0.)), gpui_window.viewport_size());
             let rows = a11y_only(&tree, &layering, &observed, scale, area);
+            let shapes = authored(&tree, &layering, &observed, scale, area);
             observed.extend(rows);
+            observed.extend(shapes);
         }
         a11y.end();
         f(observed, gpui_window, cx)

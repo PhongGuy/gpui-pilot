@@ -1122,3 +1122,48 @@ async fn a_protocol_ten_host_still_launches_and_clicks_and_a_resize_is_refused_f
     assert!(requests.contains(r#""version":10"#), "{requests}");
     assert!(!requests.contains(r#""op":"resize""#), "{requests}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn canvas_shapes_are_listed_selected_and_resized_by_id_end_to_end() {
+    let pilot = Pilot::start(Some(&config())).await;
+    let mut launch = launch_args();
+    launch["args"] = json!(["--board"]);
+    pilot.ok("launch", launch).await;
+    let tree = pilot.ok("tree", json!({})).await;
+    let board = node_named(&tree, "board")["bounds"].clone();
+    let card = node_named(&tree, "shape-2");
+    assert_eq!(card["selected"], json!(false), "{card}");
+    assert_eq!(
+        card["path"].as_array().unwrap().iter().rev().nth(1),
+        Some(&json!("board")),
+        "{card}"
+    );
+
+    let clicked = pilot.ok("click", json!({"target": id("shape-2")})).await;
+    assert!(
+        ends_with(&clicked["clicked"]["path"], "shape-2"),
+        "{clicked}"
+    );
+    let tree = pilot.ok("tree", json!({})).await;
+    assert_eq!(node_named(&tree, "shape-2")["selected"], json!(true));
+
+    let (bx, by) = (board["x"].as_f64().unwrap(), board["y"].as_f64().unwrap());
+    let to = json!({"x": bx + 400., "y": by + 130.});
+    pilot
+        .ok("drag", json!({"from": id("handle-2-se"), "to": to}))
+        .await;
+    let tree = pilot.ok("tree", json!({})).await;
+    let grown = node_named(&tree, "shape-2")["bounds"].clone();
+    let (w, h) = (grown["w"].as_f64().unwrap(), grown["h"].as_f64().unwrap());
+    assert!(
+        (w - 140.).abs() < 0.01 && (h - 110.).abs() < 0.01,
+        "{grown}"
+    );
+
+    let covered = pilot
+        .err("click", json!({"target": id("shape-3"), "timeout_ms": 200}))
+        .await;
+    assert_eq!(covered["code"], json!("Occluded"));
+    assert!(ends_with(&covered["hit"]["path"], "shape-4"), "{covered}");
+    assert_eq!(pilot.ok("close", json!({})).await["exit_code"], json!(0));
+}
