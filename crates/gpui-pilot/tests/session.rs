@@ -653,3 +653,59 @@ async fn a_screenshot_after_a_settled_tree_shows_a_long_final_frame() {
     }
     pilot.ok("close", json!({})).await;
 }
+
+/// A session launch of the debug windowed demo at scale 1, where shape extents are whole
+/// logical pixels.
+fn shapes_launch(args: &[&str]) -> Value {
+    json!({"mode": "session", "width": 1280, "height": 800, "scale": 1.0, "build": false,
+           "network": "none", "args": args})
+}
+
+/// The node in a session `tree` reply whose own accessible id is `id`.
+fn by_id(tree: &Value, id: &str) -> Value {
+    tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == json!(id))
+        .unwrap_or_else(|| panic!("no `{id}` in the tree"))
+        .clone()
+}
+
+/// How many nodes in a session `tree` reply carry a `shape-<i>` id.
+fn shapes_in(tree: &Value) -> usize {
+    tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["id"].as_str().is_some_and(|id| id.starts_with("shape-")))
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_board_panning_from_startup_still_launches() {
+    if !session_tests(Network::None) {
+        return;
+    }
+    // A debug demo panning 400 shapes from its first frame never answers AT-SPI, so the
+    // optimised build stands in for a real app, as in the spike.
+    let demo = timing_windowed();
+    require_timing_bins(&[&demo]);
+    let config = format!("[session]\nbinary = \"{}\"\n", demo.display());
+    let pilot = Pilot::start(Some(&config)).await;
+    let mut launch = shapes_launch(&["--board-shapes", "400", "--board-autopan-now"]);
+    // The pixels never settle while the board pans; only the tree's stability is under test.
+    launch["settle_ms"] = json!(0);
+    pilot.ok("launch", launch).await;
+    let mut xs = Vec::new();
+    for _ in 0..5 {
+        let tree = pilot.ok("tree", json!({"settle_ms": 0})).await;
+        assert_eq!(shapes_in(&tree), 400);
+        xs.push(by_id(&tree, "shape-0")["bounds"]["x"].as_f64().unwrap());
+    }
+    assert!(
+        xs.windows(2).any(|w| w[0] != w[1]),
+        "the shapes kept moving while listed: {xs:?}"
+    );
+    pilot.ok("close", json!({})).await;
+}

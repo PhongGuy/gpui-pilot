@@ -212,8 +212,8 @@ pub struct DemoView {
     pub shapes: Vec<Shape>,
     pub pan: (f32, f32),
     /// On `--board-shapes <n>`, the board clips its children. On `--board-autopan` the `pan`
-    /// button instead starts panning the shapes on every frame, from `board_autopan`; panning
-    /// from startup would keep a session launch from ever seeing a stable tree.
+    /// button instead starts panning the shapes on every frame, from `board_autopan`;
+    /// `--board-autopan-now` pans from the first frame.
     board_clip: bool,
     board_autopan_armed: bool,
     board_autopan: Option<Instant>,
@@ -415,9 +415,9 @@ impl DemoView {
         self.persist = Some(path);
     }
 
-    /// Applies the `--list`, `--popover`, `--board`, `--board-autopan`, `--context-menu` and
-    /// `--secret` flags and the `--dir <path>`, `--fetch <url>`, `--board-shapes <n>`,
-    /// `--render-delay-ms <n>`, `--late-paint-ms <n>`, `--ticker-ms <n>` and
+    /// Applies the `--list`, `--popover`, `--board`, `--board-autopan`, `--board-autopan-now`,
+    /// `--context-menu` and `--secret` flags and the `--dir <path>`, `--fetch <url>`,
+    /// `--board-shapes <n>`, `--render-delay-ms <n>`, `--late-paint-ms <n>`, `--ticker-ms <n>` and
     /// `--ticker-heavy <n>` pairs from `args`;
     /// unknown args are ignored.
     pub fn configure(&mut self, args: &[String]) {
@@ -433,6 +433,11 @@ impl DemoView {
         if args.iter().any(|arg| arg == "--board-autopan") {
             self.board = true;
             self.board_autopan_armed = true;
+        }
+        if args.iter().any(|arg| arg == "--board-autopan-now") {
+            self.board = true;
+            self.board_autopan_armed = true;
+            self.board_autopan = Some(Instant::now());
         }
         if args.iter().any(|arg| arg == "--secret") {
             self.secret_form = true;

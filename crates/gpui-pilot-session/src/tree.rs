@@ -198,6 +198,34 @@ impl Raw {
     }
 }
 
+/// `None` when `after` reads as the same settled tree as `before`: equal `(path, id, role)`
+/// sets, compared by path, and equal bounds for every node another node's path extends.
+/// Otherwise the reason, quoted in `LaunchFailed`.
+pub(crate) fn unstable(before: &[Node], after: &[Node]) -> Option<&'static str> {
+    // Match by path, since the walk orders by position and a moving leaf reorders the list.
+    // Only containers must hold still: leaves such as canvas shapes may animate forever.
+    if before.len() != after.len() {
+        return Some("the elements kept changing");
+    }
+    let has_children = |n: &Node| {
+        after
+            .iter()
+            .any(|m| m.path.len() > n.path.len() && m.path.starts_with(&n.path))
+    };
+    for n in after {
+        let Some(m) = before.iter().find(|m| m.path == n.path) else {
+            return Some("the elements kept changing");
+        };
+        if m.id != n.id || m.role != n.role {
+            return Some("the elements kept changing");
+        }
+        if m.bounds != n.bounds && has_children(n) {
+            return Some("the bounds of an element with children kept changing");
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +340,90 @@ mod tests {
         assert!(fake_walk(TREE, &["app"], unknown).is_err());
         let denied = |p: &str| reply("org.freedesktop.DBus.Error.AccessDenied", p);
         assert!(fake_walk(TREE, &["a"], denied).is_err());
+    }
+
+    fn n(path: &[u64], id: Option<&str>, role: &str, bounds: Rect) -> Node {
+        let segments = path.iter().map(|i| Segment::Int(*i)).collect();
+        let mut node = Node::new(segments, bounds, true, path.len() as u32 - 1);
+        node.id = id.map(str::to_owned);
+        node.role = Some(role.to_owned());
+        node
+    }
+
+    /// A frame holding a leaf button and a board with two shapes, the shapes moved by `pan`.
+    fn board(pan: f32) -> Vec<Node> {
+        vec![
+            n(&[0], None, "Frame", Rect::new(0., 0., 1280., 764.)),
+            n(&[0, 0], None, "Button", Rect::new(16., 16., 1248., 32.)),
+            n(&[0, 1], None, "Canvas", Rect::new(16., 56., 600., 300.)),
+            n(
+                &[0, 1, 0],
+                Some("shape-0"),
+                "Panel",
+                Rect::new(-64. + pan, 71., 160., 120.),
+            ),
+            n(
+                &[0, 1, 1],
+                Some("shape-1"),
+                "Panel",
+                Rect::new(236. + pan, 71., 160., 120.),
+            ),
+        ]
+    }
+
+    #[test]
+    fn equal_trees_are_stable_in_any_order() {
+        let mut after = board(0.);
+        after.reverse();
+        assert_eq!(unstable(&board(0.), &after), None);
+    }
+
+    #[test]
+    fn moving_leaves_do_not_unsettle_the_tree() {
+        // A pan moves the shapes and reorders the walk's top-then-left list.
+        let mut after = board(330.);
+        after.swap(3, 4);
+        assert_eq!(unstable(&board(0.), &after), None);
+        let mut button = board(0.);
+        button[1].bounds.w = 1200.;
+        assert_eq!(unstable(&board(0.), &button), None, "the button is a leaf");
+    }
+
+    #[test]
+    fn a_moving_container_unsettles_the_tree_and_says_so() {
+        let mut after = board(0.);
+        after[2].bounds.x += 1.;
+        assert_eq!(
+            unstable(&board(0.), &after),
+            Some("the bounds of an element with children kept changing")
+        );
+        let mut frame = board(0.);
+        frame[0].bounds.w = 1200.;
+        assert!(
+            unstable(&board(0.), &frame).is_some(),
+            "the frame holds every node"
+        );
+    }
+
+    #[test]
+    fn a_changed_element_unsettles_the_tree_and_says_so() {
+        let mut gone = board(0.);
+        gone.pop();
+        assert_eq!(
+            unstable(&board(0.), &gone),
+            Some("the elements kept changing")
+        );
+        let mut renamed = board(0.);
+        renamed[4].id = Some("shape-9".into());
+        assert_eq!(
+            unstable(&board(0.), &renamed),
+            Some("the elements kept changing")
+        );
+        let mut roled = board(0.);
+        roled[1].role = Some("Label".into());
+        assert_eq!(
+            unstable(&board(0.), &roled),
+            Some("the elements kept changing")
+        );
     }
 }

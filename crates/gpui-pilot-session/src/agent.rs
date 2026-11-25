@@ -27,6 +27,7 @@ use crate::SessionError;
 use crate::resolve::{Actionable, actionable, at_point, resolve};
 use crate::sandbox::Output;
 use crate::session::Session;
+use crate::tree;
 
 /// How long the app gets to map its window, and then to publish a stable tree.
 const BRING_UP: Duration = Duration::from_secs(15);
@@ -570,19 +571,23 @@ impl Agent {
         }
     }
 
-    /// Waits until the tree reads twice, 50 ms apart, with equal bounds: GPUI lays out again a
-    /// frame or more after the placement resize. `LaunchFailed` stage `atspi` at `deadline`.
+    /// Waits until the tree reads twice, 50 ms apart, as the same settled tree (`unstable`):
+    /// GPUI lays out again a frame or more after the placement resize. Leaf bounds are not
+    /// compared, so animated leaves do not block launch. `LaunchFailed` stage `atspi` at `deadline`.
     fn wait_stable_tree(&mut self, deadline: Instant) -> Result<(), SessionError> {
-        let mut last: Option<Vec<Rect>> = None;
+        let mut last: Option<Vec<Node>> = None;
         loop {
             let why = match self.session.tree(self.app.pid()) {
                 Ok(nodes) => {
-                    let bounds: Vec<Rect> = nodes.into_iter().map(|n| n.bounds).collect();
-                    if last.as_ref() == Some(&bounds) {
-                        return Ok(());
-                    }
-                    last = Some(bounds);
-                    "the bounds kept changing".to_owned()
+                    let why = match &last {
+                        Some(last) => match tree::unstable(last, &nodes) {
+                            None => return Ok(()),
+                            Some(why) => why,
+                        },
+                        None => "the tree was read only once",
+                    };
+                    last = Some(nodes);
+                    why.to_owned()
                 }
                 Err(error) => error.to_string(),
             };
