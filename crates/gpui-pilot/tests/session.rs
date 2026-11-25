@@ -861,3 +861,38 @@ async fn session_shapes_read_and_act_like_headless_ones() {
     session.ok("close", json!({})).await;
     headless.ok("close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_tree_of_400_shapes_reads_within_its_budget() {
+    const TEST: &str = "a_session_tree_of_400_shapes_reads_within_its_budget";
+    if !session_tests(Network::None) || common::load::timing_skipped(TEST) {
+        return;
+    }
+    let (server, demo) = (timing_server(), timing_windowed());
+    require_timing_bins(&[&server, &demo]);
+    let config = format!("[session]\nbinary = \"{}\"\n", demo.display());
+    let pilot = Pilot::start_with(&server, Some(&config)).await;
+    pilot
+        .ok("launch", shapes_launch(&["--board-shapes", "400"]))
+        .await;
+    let tree = pilot.ok("tree", json!({})).await;
+    assert_eq!(shapes_in(&tree), 400);
+    // Budget above the worst 400-shape walk measured; see
+    // docs/research/2026-11-25-session-canvas-shapes.md.
+    let mut ms = Vec::new();
+    for _ in 0..10 {
+        let started = Instant::now();
+        pilot
+            .ok("tree", json!({"settle_ms": 0, "max_chars": 2000}))
+            .await;
+        ms.push(started.elapsed().as_secs_f64() * 1000.);
+    }
+    ms.sort_by(f64::total_cmp);
+    let p95 = ms[9];
+    assert!(
+        p95 <= 400.,
+        "p95 of 10 tree reads at 400 shapes is {p95:.1} ms, over 400 ms: {ms:?}; {}",
+        common::load::report()
+    );
+    pilot.ok("close", json!({})).await;
+}
