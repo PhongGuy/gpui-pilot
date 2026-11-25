@@ -682,6 +682,27 @@ fn shapes_in(tree: &Value) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_debug_app_animating_from_launch_fails_fast_naming_why() {
+    if !session_tests(Network::None) {
+        return;
+    }
+    // A debug demo panning 400 shapes from its first frame never answers AT-SPI (#45).
+    let pilot = Pilot::start(Some(&config())).await;
+    let mut launch = shapes_launch(&["--board-shapes", "400", "--board-autopan-now"]);
+    launch["settle_ms"] = json!(0);
+    let started = Instant::now();
+    let failed = pilot.err("launch", launch).await;
+    let took = started.elapsed();
+    assert_eq!(failed["code"], json!("LaunchFailed"), "{failed}");
+    let message = failed["message"].as_str().unwrap();
+    assert!(message.contains("not answering"), "{message}");
+    assert!(
+        took < Duration::from_secs(25),
+        "launch failed after {took:?}: {message}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_board_panning_from_startup_still_launches() {
     if !session_tests(Network::None) {
         return;
