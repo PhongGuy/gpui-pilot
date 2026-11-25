@@ -1,5 +1,7 @@
 //! The app's AT-SPI tree, read from the session's accessibility bus as protocol `Node`s.
 
+use std::time::{Duration, Instant};
+
 use atspi_common::{CoordType, State, StateSet};
 use atspi_proxies::accessible::AccessibleProxyBlocking;
 use atspi_proxies::component::ComponentProxyBlocking;
@@ -12,6 +14,14 @@ use crate::SessionError;
 const REGISTRY: &str = "org.a11y.atspi.Registry";
 const ROOT: &str = "/org/a11y/atspi/accessible/root";
 const UNKNOWN_OBJECT: &str = "org.freedesktop.DBus.Error.UnknownObject";
+const NO_REPLY: &str = "org.freedesktop.DBus.Error.NoReply";
+const UNKNOWN_METHOD: &str = "org.freedesktop.DBus.Error.UnknownMethod";
+const UNKNOWN_INTERFACE: &str = "org.freedesktop.DBus.Error.UnknownInterface";
+
+/// How long one call to the app may take before it counts as not answering.
+pub(crate) const CALL_LIMIT: Duration = Duration::from_secs(2);
+/// The longest one tree walk may take.
+pub(crate) const WALK_LIMIT: Duration = Duration::from_secs(10);
 
 /// Walks every node below `pid`'s application object, sorted by top, left, then path.
 /// `content` supplies the client area relative to the surface origin: its size bounds the frame,
@@ -20,11 +30,13 @@ pub(crate) fn walk(
     a11y: &Connection,
     pid: u32,
     scale: f32,
+    deadline: Instant,
     content: impl FnOnce() -> Result<Rect, SessionError>,
 ) -> Result<Vec<Node>, SessionError> {
     let (name, path) = application(a11y, pid)?;
     let found = collect(
         path,
+        deadline,
         |path| {
             let children = accessible(a11y, &name, path)?.get_children()?;
             Ok(children
@@ -53,21 +65,37 @@ pub(crate) fn walk(
 /// Depth-first from the application object at `root`, reading each node below it with its
 /// child-index path; `children` lists a node's child object paths. A node below the root that
 /// vanishes mid-walk (`UnknownObject`, as a re-rendering app drops it) is skipped with its
-/// subtree; any other error, or the root vanishing, fails the walk.
+/// subtree; any other error, or the root vanishing, fails the walk. A call the app does not
+/// answer, or a walk still going at `deadline`, fails it as `Timeout`.
 fn collect(
     root: String,
+    deadline: Instant,
     mut children: impl FnMut(&str) -> zbus::Result<Vec<String>>,
     mut read: impl FnMut(&str, Vec<u64>) -> zbus::Result<Raw>,
 ) -> Result<Vec<Raw>, SessionError> {
     let mut found = Vec::new();
     let mut stack = vec![(root, Vec::<u64>::new())];
     while let Some((path, indices)) = stack.pop() {
+        if Instant::now() >= deadline {
+            return Err(SessionError::Timeout(format!(
+                "reading the accessibility tree passed its deadline after {} nodes",
+                found.len()
+            )));
+        }
         let below_root = !indices.is_empty();
         // The application object itself is not a node; only what lies below it is read.
         let node = below_root.then(|| read(&path, indices.clone())).transpose();
         let listed = node.and_then(|node| Ok((node, children(&path)?)));
         let (node, kids) = match listed {
             Ok(listed) => listed,
+            Err(error) if not_answering(&error) => {
+                return Err(SessionError::Timeout(format!(
+                    "the app is not answering accessibility requests (none within {} s); a debug \
+                     build busy drawing every frame cannot answer: launch an optimised build or \
+                     start animation after launch",
+                    CALL_LIMIT.as_secs()
+                )));
+            }
             Err(error) if below_root && vanished(&error) => continue,
             Err(error) => return Err(error.into()),
         };
@@ -79,6 +107,37 @@ fn collect(
         }
     }
     Ok(found)
+}
+
+/// True for a call the peer did not answer in time: io `TimedOut`, or a `NoReply` error.
+fn not_answering(error: &zbus::Error) -> bool {
+    match error {
+        zbus::Error::InputOutput(e) => e.kind() == std::io::ErrorKind::TimedOut,
+        zbus::Error::MethodError(name, ..) => name.as_str() == NO_REPLY,
+        zbus::Error::FDO(error) => matches!(**error, zbus::fdo::Error::NoReply(_)),
+        _ => false,
+    }
+}
+
+/// `Ok(None)` when the object lacks the interface; every other error propagates.
+fn without_interface<T>(result: zbus::Result<T>) -> zbus::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(zbus::Error::MethodError(name, ..))
+            if matches!(name.as_str(), UNKNOWN_METHOD | UNKNOWN_INTERFACE) =>
+        {
+            Ok(None)
+        }
+        Err(zbus::Error::FDO(error))
+            if matches!(
+                *error,
+                zbus::fdo::Error::UnknownMethod(_) | zbus::fdo::Error::UnknownInterface(_)
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// True when `error` says the object is no longer on the bus.
@@ -157,8 +216,9 @@ fn read(
         id: accessible.accessible_id()?,
         role: format!("{:?}", accessible.get_role()?),
         name: accessible.name()?,
-        // A node without the Component interface fails here; it is treated like the frame.
-        extents: component.get_extents(CoordType::Window).ok(),
+        // A node without the Component interface is treated like the frame; any other failure,
+        // a timeout above all, fails the walk instead of letting it limp on.
+        extents: without_interface(component.get_extents(CoordType::Window))?,
         state: accessible.get_state()?,
     })
 }
@@ -229,6 +289,7 @@ pub(crate) fn unstable(before: &[Node], after: &[Node]) -> Option<&'static str> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     fn raw(extents: Option<(i32, i32, i32, i32)>, states: &[State]) -> Raw {
         Raw {
@@ -284,6 +345,7 @@ mod tests {
     ) -> Result<Vec<Vec<u64>>, SessionError> {
         let raws = collect(
             "app".into(),
+            Instant::now() + Duration::from_secs(60),
             |path| {
                 if gone.contains(&path) {
                     return Err(fail(path));
@@ -340,6 +402,109 @@ mod tests {
         assert!(fake_walk(TREE, &["app"], unknown).is_err());
         let denied = |p: &str| reply("org.freedesktop.DBus.Error.AccessDenied", p);
         assert!(fake_walk(TREE, &["a"], denied).is_err());
+    }
+
+    /// `TREE`'s children of `path`, for walks that need no failures.
+    fn kids(path: &str) -> zbus::Result<Vec<String>> {
+        Ok(TREE
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, c)| c.iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default())
+    }
+
+    fn timed_out(_: &str) -> zbus::Error {
+        zbus::Error::from(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out",
+        ))
+    }
+
+    #[test]
+    fn a_call_the_app_does_not_answer_fails_the_walk_as_not_answering() {
+        let no_reply = |p: &str| reply("org.freedesktop.DBus.Error.NoReply", p);
+        let fdo = |p: &str| zbus::Error::FDO(Box::new(zbus::fdo::Error::NoReply(p.into())));
+        let fails: [fn(&str) -> zbus::Error; 3] = [timed_out, no_reply, fdo];
+        for fail in fails {
+            // The application object, an inner node and a leaf: none is skipped as vanished.
+            for gone in ["app", "a", "b1"] {
+                match fake_walk(TREE, &[gone], fail) {
+                    Err(SessionError::Timeout(m)) => {
+                        assert!(m.contains("not answering") && m.contains("2 s"), "{m}")
+                    }
+                    other => panic!("{gone}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_walk_past_its_deadline_fails_naming_the_nodes_read() {
+        // Depth first from the last child: b, then b1, which outlasts the deadline before a.
+        let started = Instant::now();
+        let slow = collect(
+            "app".into(),
+            started + Duration::from_millis(100),
+            kids,
+            |path, indices| {
+                if path == "b1" {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                let mut r = raw(None, &[]);
+                r.indices = indices;
+                Ok(r)
+            },
+        );
+        match slow {
+            Err(SessionError::Timeout(m)) => {
+                assert!(m.contains("passed its deadline after 2 nodes"), "{m}")
+            }
+            other => panic!("{other:?}"),
+        }
+        let late = collect("app".into(), Instant::now(), kids, |_, _| {
+            panic!("no node is read past the deadline")
+        });
+        match late {
+            Err(SessionError::Timeout(m)) => assert!(m.contains("after 0 nodes"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_walk_within_its_deadline_reads_every_node() {
+        let all = collect(
+            "app".into(),
+            Instant::now() + Duration::from_secs(60),
+            kids,
+            |_, indices| {
+                let mut r = raw(None, &[]);
+                r.indices = indices;
+                Ok(r)
+            },
+        )
+        .unwrap();
+        assert_eq!(all.len(), 4);
+    }
+
+    #[test]
+    fn only_a_missing_interface_reads_as_no_extents() {
+        let extents = (1, 2, 3, 4);
+        assert_eq!(without_interface(Ok(extents)).unwrap(), Some(extents));
+        for name in [
+            "org.freedesktop.DBus.Error.UnknownMethod",
+            "org.freedesktop.DBus.Error.UnknownInterface",
+        ] {
+            let missing = without_interface::<(i32, i32, i32, i32)>(Err(reply(name, "a")));
+            assert_eq!(missing.unwrap(), None, "{name}");
+        }
+        let fdo = zbus::Error::FDO(Box::new(zbus::fdo::Error::UnknownInterface("a".into())));
+        assert_eq!(without_interface::<()>(Err(fdo)).unwrap(), None);
+        assert!(without_interface::<()>(Err(timed_out("a"))).is_err());
+        let unknown = reply("org.freedesktop.DBus.Error.UnknownObject", "a");
+        assert!(
+            without_interface::<()>(Err(unknown)).is_err(),
+            "a vanished node is not a missing interface"
+        );
     }
 
     fn n(path: &[u64], id: Option<&str>, role: &str, bounds: Rect) -> Node {

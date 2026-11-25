@@ -493,7 +493,10 @@ impl Session {
     pub fn tree(&mut self, pid: u32) -> Result<Vec<Node>, SessionError> {
         let a11y = self.a11y.clone();
         let scale = self.output.scale;
-        crate::tree::walk(&a11y, pid, scale, || self.window(pid).map(|g| g.content()))
+        let deadline = std::time::Instant::now() + crate::tree::WALK_LIMIT;
+        crate::tree::walk(&a11y, pid, scale, deadline, || {
+            self.window(pid).map(|g| g.content())
+        })
     }
 
     /// Captures the whole output at native resolution.
@@ -859,8 +862,11 @@ impl Session {
             .ok()?;
         // Qt reports logical extents, so the dialog's tree is read at scale 1 (spike §3).
         let a11y = self.a11y.clone();
-        let nodes =
-            crate::tree::walk(&a11y, pid, 1.0, || self.window(pid).map(|g| g.content())).ok()?;
+        let deadline = std::time::Instant::now() + crate::tree::WALK_LIMIT;
+        let nodes = crate::tree::walk(&a11y, pid, 1.0, deadline, || {
+            self.window(pid).map(|g| g.content())
+        })
+        .ok()?;
         let mut edits = nodes.iter().filter(|n| {
             n.id.as_deref()
                 .is_some_and(|id| id.ends_with(LOCATION_EDIT))
