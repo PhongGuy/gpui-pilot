@@ -308,6 +308,7 @@ printf '%s\n' 'launch {"mode": "headless"}' \
 - `drop` is headless only.
 - `frames` with `a11y` is headless only; session mode refuses it with `Unsupported`.
 - In session mode a debug app that animates every frame from its first frame cannot answer accessibility requests, so its launch fails after about 20 s naming that; launch an optimised build or start the animation after launch.
+- In session mode an app whose large accessibility tree moves every frame (about 1000 panning canvas shapes in a debug build, about 4000 in an optimised one) leaves its accessibility thread behind and its memory grows while the motion lasts. Tree reads (`tree`, `wait`, id targets) answer `Timeout` until the motion stops, so use point targets and screenshots while it moves. The AT-SPI registry may stop listing such an app; the pilot finds it by its pid and reads it again as soon as it answers.
 - Headless mode shares the host's network; use session mode with `none` or `pasta` when the app must not reach it.
 - `frames` numbers are only meaningful when the app's dependencies are built optimised.
 - The host pins gpui-kit 0.11.0; an app on another gpui-kit version needs a host release built for that version.
