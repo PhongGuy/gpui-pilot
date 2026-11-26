@@ -21,8 +21,9 @@ use gpui_kit::{
     App, Bounds, DragMoveEvent, ElementId, Entity, ExternalPaths, GlobalElementId,
     InspectorElementId, Interactivity, LayoutId, Modifiers, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, PromptLevel, Role, ScrollDelta,
-    ScrollEvent, TestSupportExt as _, UniformListScrollHandle, Window, WindowDecorations,
-    WindowHandle, WindowOptions, accesskit, canvas, div, fill, point, px, rgb, size, uniform_list,
+    ScrollEvent, TestSupportExt as _, UniformListScrollHandle, Window, WindowAppearance,
+    WindowDecorations, WindowHandle, WindowOptions, accesskit, canvas, div, fill, point, px, rgb,
+    size, uniform_list,
 };
 
 gpui_kit::actions!(pilot_demo, [Pick]);
@@ -201,6 +202,10 @@ pub struct DemoView {
     pub fetched: Option<String>,
     /// `Some(reused)` on `--show-data`: whether the launch reused a kept data dir.
     pub data_reused: Option<bool>,
+    /// On `--show-appearance`, the window shows its appearance as `Appearance light|dark`.
+    pub show_appearance: bool,
+    /// The last file prompt's error, `{e:#}`, once one resolved to `Err(e)`.
+    pub prompt_error: Option<String>,
     /// On `--list`, the window shows only a `LIST_ROWS`-row `uniform_list`.
     pub list: bool,
     /// On `--big-value N`, the window shows only the `name` input and a `big` element whose
@@ -359,6 +364,8 @@ impl DemoView {
             fetch_url: None,
             fetched: None,
             data_reused: None,
+            show_appearance: false,
+            prompt_error: None,
             list: false,
             big_value: None,
             board: false,
@@ -588,13 +595,15 @@ impl DemoView {
             prompt: None,
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = answer.await {
-                this.update(cx, |view, cx| {
+            match answer.await {
+                Ok(Ok(Some(paths))) => this.update(cx, |view, cx| {
                     view.opened = Some(paths);
                     cx.notify();
-                })
-                .ok();
+                }),
+                Ok(Err(e)) => this.update(cx, |view, cx| view.fail_prompt(e, cx)),
+                _ => Ok(()),
             }
+            .ok();
         })
         .detach();
     }
@@ -724,16 +733,24 @@ impl DemoView {
         .detach();
     }
 
+    /// Shows a file prompt's error in the `prompt-error` readout.
+    fn fail_prompt(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
+        self.prompt_error = Some(format!("{error:#}"));
+        cx.notify();
+    }
+
     fn pick_save(&mut self, cx: &mut Context<Self>) {
         let answer = cx.prompt_for_new_path(&std::env::temp_dir(), Some("demo.txt"));
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(path))) = answer.await {
-                this.update(cx, |view, cx| {
+            match answer.await {
+                Ok(Ok(Some(path))) => this.update(cx, |view, cx| {
                     view.saved = Some(path);
                     cx.notify();
-                })
-                .ok();
+                }),
+                Ok(Err(e)) => this.update(cx, |view, cx| view.fail_prompt(e, cx)),
+                _ => Ok(()),
             }
+            .ok();
         })
         .detach();
     }
@@ -1263,6 +1280,31 @@ impl Render for DemoView {
                         }),
                 )
             })
+            // Only with `--show-appearance`, and only once a prompt failed, for the same reason.
+            .when(self.show_appearance, |this| {
+                let light = matches!(
+                    window.appearance(),
+                    WindowAppearance::Light | WindowAppearance::VibrantLight
+                );
+                this.child(
+                    A11y(Button::new("appearance"))
+                        .accessibility_id("appearance")
+                        .0
+                        .label(if light {
+                            "Appearance light"
+                        } else {
+                            "Appearance dark"
+                        }),
+                )
+            })
+            .when_some(self.prompt_error.clone(), |this, error| {
+                this.child(
+                    A11y(Button::new("prompt-error"))
+                        .accessibility_id("prompt-error")
+                        .0
+                        .label(format!("Prompt error: {error}")),
+                )
+            })
             // Only with `--late-paint-ms`, so other trees and screenshots stay unchanged.
             .when(self.late_paint.is_some(), |this| {
                 this.child(
@@ -1606,8 +1648,9 @@ impl gpui_pilot_host::PilotApp for Demo {
     /// Opens the demo, greets with `PILOT_DEMO_GREETING` when set, boots on `--boot`, keeps
     /// its count in the launch's data dir on `--persist`, and guards its close on
     /// `--guard-close`, applies `--dir`, `--fetch`, `--render-delay-ms` and `--late-paint-ms`,
-    /// shows data reuse on `--show-data`, shows only the long list on `--list`, only the
-    /// popover fixture on `--popover`, and only the context menu fixture on `--context-menu`, and the canvas fixture on `--board`.
+    /// shows data reuse on `--show-data` and the appearance on `--show-appearance`, shows only
+    /// the long list on `--list`, only the popover fixture on `--popover`, only the context menu
+    /// fixture on `--context-menu`, and the canvas fixture on `--board`.
     fn open(&self, launch: &gpui_pilot_host::Launch, cx: &mut App) -> anyhow::Result<()> {
         let (handle, demo) = open(cx)?;
         if launch.args.iter().any(|arg| arg == "--guard-close") {
@@ -1617,9 +1660,11 @@ impl gpui_pilot_host::PilotApp for Demo {
         let boot = launch.args.iter().any(|arg| arg == "--boot");
         let persist = launch.args.iter().any(|arg| arg == "--persist");
         let show_data = launch.args.iter().any(|arg| arg == "--show-data");
+        let show_appearance = launch.args.iter().any(|arg| arg == "--show-appearance");
         demo.update(cx, |view, cx| {
             view.greeting = greeting;
             view.data_reused = show_data.then_some(launch.reused);
+            view.show_appearance = show_appearance;
             view.configure(&launch.args);
             if persist {
                 view.persist_to(launch.data_dir.join("clicks"));

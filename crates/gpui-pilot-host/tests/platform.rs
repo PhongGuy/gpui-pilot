@@ -94,3 +94,56 @@ fn side_effects_are_recorded_not_run() {
     );
     assert!(refused, "idle inhibition and windowing changes are refused");
 }
+
+#[test]
+fn a_failed_answer_errors_the_pending_prompt_or_the_next_one() {
+    let results = with_platform(|platform, cx| async move {
+        let options = PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        };
+        let open = cx.update(|cx| cx.prompt_for_paths(options.clone()));
+        let failed_open = platform.fail_prompt("disk gone".into());
+        let open_error = open.await.unwrap().unwrap_err().to_string();
+        let save = cx.update(|cx| cx.prompt_for_new_path(Path::new("/tmp"), Some("s.txt")));
+        let failed_save = platform.fail_prompt("read-only".into());
+        let save_error = save.await.unwrap().unwrap_err().to_string();
+        let queued = platform.fail_prompt("later".into());
+        let waiting = platform.has_queued_answer();
+        let next = cx.update(|cx| cx.prompt_for_paths(options));
+        let next_error = next.await.unwrap().unwrap_err().to_string();
+        (
+            failed_open,
+            open_error,
+            failed_save,
+            save_error,
+            queued,
+            waiting,
+            next_error,
+            platform.pending_prompt(),
+            platform.has_queued_answer(),
+        )
+    });
+    let open = PathPrompt::Open {
+        directories: false,
+        multiple: false,
+    };
+    assert_eq!(results.0, (PromptAnswered::Failed, Some(open)));
+    assert_eq!(results.1, "disk gone");
+    let save = PathPrompt::Save {
+        directory: "/tmp".into(),
+        suggested_name: Some("s.txt".into()),
+    };
+    assert_eq!(results.2, (PromptAnswered::Failed, Some(save)));
+    assert_eq!(results.3, "read-only");
+    assert_eq!(results.4, (PromptAnswered::Queued, None));
+    assert!(results.5, "the failure waits for the next prompt");
+    assert_eq!(results.6, "later");
+    assert_eq!(
+        (results.7, results.8),
+        (None, false),
+        "nothing is left pending or queued"
+    );
+}

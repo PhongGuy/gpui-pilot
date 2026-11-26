@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 
 use gpui_pilot_protocol::{
     BackendFrame, ClientFrame, ErrorCode, LaunchParams, MAX_NOTCHES, MouseButton, NOTCH_MS_RANGE,
-    Node, Outcome, PROTOCOL_VERSION, PilotError, REFRESH_RATES_HZ, Rect, Reply, Request, Target,
-    WaitUntil, WindowInfo, hover_wait_ms, read_line, read_line_lenient, write_line,
+    Node, Outcome, PROTOCOL_VERSION, PickAnswer, PilotError, REFRESH_RATES_HZ, Rect, Reply,
+    Request, Target, WaitUntil, WindowInfo, hover_wait_ms, read_line, read_line_lenient,
+    write_line,
 };
 
 use rustix::event::{PollFd, PollFlags, Timespec};
@@ -886,6 +887,15 @@ impl Agent {
                 timeout_ms,
                 settle_ms,
             } => self.tree(within, wait_for, timeout_ms, settle_ms),
+            // Answered before any dialog wait: the real KDE portal has no way to fail a pick,
+            // and the session's escape fallback would silently cancel it.
+            Request::PickFile {
+                answer: PickAnswer::Fail(_),
+                ..
+            } => Err(Failure::Pilot(PilotError::new(
+                ErrorCode::Unsupported,
+                "`fail` on pick_file is headless only; session dialogs are the real KDE portal",
+            ))),
             Request::PickFile {
                 answer,
                 settle_ms,

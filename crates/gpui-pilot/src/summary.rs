@@ -237,6 +237,7 @@ fn pick_file(value: &Value) -> String {
     let mut line = match value["answered"].as_str() {
         Some("queued") => "queued for the next dialog".to_owned(),
         Some("cancelled") => format!("cancelled the {kind} dialog"),
+        Some("failed") => format!("failed the {kind} dialog"),
         _ => format!("answered the {kind} dialog"),
     };
     if let Some(paths) = value.get("paths").filter(|paths| !paths.is_null()) {
@@ -630,6 +631,11 @@ mod tests {
         assert_eq!(
             summary("pick_file", &cancelled),
             "pick_file: cancelled the save dialog; settled"
+        );
+        let failed = json!({"answered": "failed", "prompt": {"kind": "open", "multiple": false}, "settled": true});
+        assert_eq!(
+            summary("pick_file", &failed),
+            "pick_file: failed the open dialog; settled"
         );
         let staged = json!({"answered": "open", "prompt": {"kind": "open", "multiple": false},
             "paths": ["/in/1/a.yml"], "settled": true});

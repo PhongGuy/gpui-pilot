@@ -152,7 +152,7 @@ fn wait_budget(request: &gpui_pilot_protocol::Request) -> u64 {
 #[tool_router]
 impl PilotServer {
     #[tool(
-        description = "Build and start the configured app, replacing a running one on request. The result's reused is true when the launch took a kept data dir (keep_data), so the app keeps its saved state. refresh_hz is the rate the display really runs at, in Hz (session: KWin's libxcvt-derived rate, e.g. 143.832 for 144). host_pid is the app's pid as the server's machine sees it (session mode runs the app in its own pid namespace, where pid is its pid inside); it is absent when it cannot be found."
+        description = "Build and start the configured app, replacing a running one on request. The result's reused is true when the launch took a kept data dir (keep_data), so the app keeps its saved state. refresh_hz is the rate the display really runs at, in Hz (session: KWin's libxcvt-derived rate, e.g. 143.832 for 144). host_pid is the app's pid as the server's machine sees it (session mode runs the app in its own pid namespace, where pid is its pid inside); it is absent when it cannot be found. appearance (headless only) sets the system appearance the window reports, light or dark (default dark)."
     )]
     async fn launch(
         &self,
@@ -369,7 +369,7 @@ impl PilotServer {
     }
 
     #[tool(
-        description = "Answer the app's open or save prompt with paths, or cancel it. In session mode it waits up to `timeout_ms` for the dialog, may copy inputs into the launch directory, and reports in `paths` the paths the app was given."
+        description = "Answer the app's open or save prompt with paths, or cancel it. fail (headless only) makes the app's prompt resolve to an error with that message, queued like any answer when no prompt is open. In session mode it waits up to `timeout_ms` for the dialog, may copy inputs into the launch directory, and reports in `paths` the paths the app was given."
     )]
     async fn pick_file(
         &self,

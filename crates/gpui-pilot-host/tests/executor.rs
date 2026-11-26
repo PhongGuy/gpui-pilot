@@ -565,3 +565,47 @@ fn tree_reports_its_settle_and_a_zero_budget_does_not_settle() {
     assert!(waited.1.is_some_and(|ms| ms <= 2000), "{waited:?}");
     assert_eq!(skipped, (Some(false), Some(0)));
 }
+
+#[test]
+fn a_failing_pick_answers_the_pending_prompt_and_queues_otherwise() {
+    let (failed, queued) = with_demo(640., 400., 1.0, |mut h| async move {
+        first_frame(&h).await;
+        let pilot = Pilot::new(h.platform.clone());
+        let fail = |message: &str| Request::PickFile {
+            answer: PickAnswer::Fail(message.into()),
+            settle_ms: 100,
+            timeout_ms: None,
+        };
+        let click = Request::Click {
+            target: id("open"),
+            button: MouseButton::Left,
+            count: 1,
+            modifiers: Vec::new(),
+            timeout_ms: 1000,
+            settle_ms: 500,
+        };
+        pilot.handle(click, &mut h.cx).await;
+        let failed = pilot.handle(fail("disk gone"), &mut h.cx).await;
+        let queued = pilot.handle(fail("later"), &mut h.cx).await;
+        (failed, queued)
+    });
+    match failed {
+        Outcome::Ok(Reply::PickFile {
+            answered: Answered::Failed,
+            prompt: Some(prompt),
+            ..
+        }) => assert_eq!(prompt.kind, PromptKind::Open),
+        other => panic!("unexpected: {other:?}"),
+    }
+    assert!(
+        matches!(
+            queued,
+            Outcome::Ok(Reply::PickFile {
+                answered: Answered::Queued,
+                prompt: None,
+                ..
+            })
+        ),
+        "{queued:?}"
+    );
+}

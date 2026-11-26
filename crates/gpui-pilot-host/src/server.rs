@@ -8,10 +8,13 @@ use std::{
 };
 
 use futures::{StreamExt as _, channel::mpsc};
-use gpui_kit::{App, Application, AssetSource, Pixels, SharedString, Size, px, size};
+use gpui_kit::{
+    App, Application, AssetSource, Pixels, SharedString, Size, WindowAppearance, px, size,
+};
 use gpui_pilot_protocol::{
-    BackendFrame, ClientFrame, ErrorCode, LaunchParams, Outcome, PROTOCOL_VERSION, PilotError,
-    REFRESH_RATES_HZ, Reply, Request, WindowInfo, read_line, read_line_lenient, write_line,
+    Appearance, BackendFrame, ClientFrame, ErrorCode, LaunchParams, Outcome, PROTOCOL_VERSION,
+    PilotError, REFRESH_RATES_HZ, Reply, Request, WindowInfo, read_line, read_line_lenient,
+    write_line,
 };
 
 use crate::{Pilot, PilotPlatform, settle::settle};
@@ -85,6 +88,7 @@ pub fn run(app: impl PilotApp) -> ExitCode {
         launch.refresh_hz,
     );
     platform.set_settle_horizon(Duration::from_millis(launch.settle_horizon_ms));
+    platform.set_appearance(window_appearance(launch.appearance));
     let window = WindowInfo::new(launch.width, launch.height, launch.scale);
     let settle_ms = launch.settle_ms;
     let launch = Launch {
@@ -299,6 +303,14 @@ fn serve(
     .detach();
 }
 
+/// The GPUI appearance a launch asks for; dark unless light was asked.
+fn window_appearance(appearance: Appearance) -> WindowAppearance {
+    match appearance {
+        Appearance::Light => WindowAppearance::Light,
+        _ => WindowAppearance::Dark,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::single_threaded;
@@ -319,6 +331,22 @@ mod tests {
             checked
                 .unwrap_err()
                 .contains("call run first thing in main")
+        );
+    }
+
+    #[test]
+    fn the_launch_appearance_is_what_the_windows_report() {
+        use super::window_appearance;
+        use gpui_kit::WindowAppearance;
+        use gpui_pilot_protocol::Appearance;
+        assert_eq!(
+            window_appearance(Appearance::Light),
+            WindowAppearance::Light
+        );
+        assert_eq!(window_appearance(Appearance::Dark), WindowAppearance::Dark);
+        assert_eq!(
+            window_appearance(Appearance::default()),
+            WindowAppearance::Dark
         );
     }
 }

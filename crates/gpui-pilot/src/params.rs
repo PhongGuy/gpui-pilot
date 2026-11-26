@@ -4,8 +4,8 @@ use crate::bound::MAX_SLICE_CHARS;
 use crate::config::Mode;
 use crate::error::ToolError;
 use gpui_pilot_protocol::{
-    ErrorCode, MAX_NOTCHES, Modifier, MouseButton, NOTCH_MS_RANGE, PickAnswer, Reply, Request,
-    Segment, Target, WaitUntil, Wheel,
+    Appearance, ErrorCode, MAX_NOTCHES, Modifier, MouseButton, NOTCH_MS_RANGE, PickAnswer, Reply,
+    Request, Segment, Target, WaitUntil, Wheel,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,23 @@ impl From<Button> for MouseButton {
             Button::Left => MouseButton::Left,
             Button::Right => MouseButton::Right,
             Button::Middle => MouseButton::Middle,
+        }
+    }
+}
+
+/// The system appearance a headless window reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum AppearanceArg {
+    Light,
+    Dark,
+}
+
+impl From<AppearanceArg> for Appearance {
+    fn from(appearance: AppearanceArg) -> Self {
+        match appearance {
+            AppearanceArg::Light => Appearance::Light,
+            AppearanceArg::Dark => Appearance::Dark,
         }
     }
 }
@@ -259,6 +276,9 @@ pub(crate) struct LaunchArgs {
     /// `pick_file` and `save_to` paths resolve against it until the app closes. A worktree
     /// builds into its own target/, so its first build is cold.
     pub project_dir: Option<String>,
+    /// Headless only: the system appearance the window reports, `light` or `dark`
+    /// (default `dark`); session mode refuses it.
+    pub appearance: Option<AppearanceArg>,
 }
 
 /// Arguments of `close`.
@@ -548,11 +568,14 @@ pub(crate) struct WaitArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PickFileArgs {
-    /// Answer the prompt with these paths (exactly one of `paths` and `cancel`).
+    /// Answer the prompt with these paths (exactly one of `paths`, `cancel` and `fail`).
     pub paths: Option<Vec<PathBuf>>,
     /// Cancel the prompt instead.
     #[serde(default)]
     pub cancel: bool,
+    /// Headless only: make the prompt fail with this message, as a broken system
+    /// dialog would (exactly one of `paths`, `cancel` and `fail`).
+    pub fail: Option<String>,
     /// Accepted for session mode; headless answers or queues at once.
     #[serde(default = "pick_timeout_ms")]
     pub timeout_ms: u64,
@@ -817,13 +840,22 @@ impl ClipboardArgs {
 }
 
 impl PickFileArgs {
-    /// Exactly one of non-empty `paths` and `cancel: true`; the `Err` text is for the client.
-    /// Paths stay as given: the driver resolves relative ones against the project folder.
+    /// Exactly one of non-empty `paths`, `cancel: true` and a non-empty `fail`; the `Err` text
+    /// is for the client. Paths stay as given: the driver resolves relative ones against the
+    /// project folder.
     pub fn request(self) -> Result<Request, String> {
-        let answer = match (self.paths.filter(|p| !p.is_empty()), self.cancel) {
-            (Some(paths), false) => PickAnswer::Paths(paths),
-            (None, true) => PickAnswer::Cancel,
-            _ => return Err("pass exactly one of non-empty `paths` and `cancel: true`".into()),
+        if self.fail.as_deref() == Some("") {
+            return Err("`fail` needs a message for the app's prompt error".into());
+        }
+        let answer = match (self.paths.filter(|p| !p.is_empty()), self.cancel, self.fail) {
+            (Some(paths), false, None) => PickAnswer::Paths(paths),
+            (None, true, None) => PickAnswer::Cancel,
+            (None, false, Some(message)) => PickAnswer::Fail(message),
+            _ => {
+                return Err(
+                    "pass exactly one of non-empty `paths`, `cancel: true` and `fail`".into(),
+                );
+            }
         };
         Ok(Request::PickFile {
             answer,
@@ -1186,6 +1218,47 @@ mod tests {
             let pick: PickFileArgs = args(bad.clone()).unwrap();
             assert!(pick.request().is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn launch_takes_an_appearance_and_leaves_it_unset_by_default() {
+        let plain: LaunchArgs = args(json!({"mode": "headless"})).unwrap();
+        assert_eq!(plain.appearance, None);
+        let light: LaunchArgs = args(json!({"mode": "headless", "appearance": "light"})).unwrap();
+        assert_eq!(
+            light.appearance.map(Appearance::from),
+            Some(Appearance::Light)
+        );
+        let dark: LaunchArgs = args(json!({"mode": "headless", "appearance": "dark"})).unwrap();
+        assert_eq!(
+            dark.appearance.map(Appearance::from),
+            Some(Appearance::Dark)
+        );
+        assert!(args::<LaunchArgs>(json!({"mode": "headless", "appearance": "blue"})).is_err());
+    }
+
+    #[test]
+    fn pick_file_takes_a_failure_message_alone() {
+        let fail: PickFileArgs = args(json!({"fail": "disk gone"})).unwrap();
+        assert_eq!(
+            fail.request().unwrap(),
+            Request::PickFile {
+                answer: PickAnswer::Fail("disk gone".into()),
+                settle_ms: 2000,
+                timeout_ms: Some(10_000),
+            }
+        );
+        for bad in [
+            json!({"fail": "x", "cancel": true}),
+            json!({"fail": "x", "paths": ["a"]}),
+            json!({"fail": "x", "paths": ["a"], "cancel": true}),
+        ] {
+            let pick: PickFileArgs = args(bad.clone()).unwrap();
+            assert!(pick.request().is_err(), "{bad}");
+        }
+        let empty: PickFileArgs = args(json!({"fail": ""})).unwrap();
+        let error = empty.request().unwrap_err();
+        assert!(error.contains("`fail`"), "{error}");
     }
 
     #[test]

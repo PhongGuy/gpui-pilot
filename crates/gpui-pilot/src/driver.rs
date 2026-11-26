@@ -6,9 +6,10 @@ use std::process::{Child, ExitStatus};
 use std::time::{Duration, Instant};
 
 use gpui_pilot_protocol::{
-    A11Y_FRAMES_VERSION, Answered, DEFAULT_REFRESH_HZ, DRAG_BUTTON_VERSION, DROP_VERSION,
-    ErrorCode, LaunchParams, MODIFIERS_VERSION, MouseButton, Outcome, PROTOCOL_VERSION, PickAnswer,
-    PilotError, REFRESH_RATES_HZ, RESIZE_VERSION, Reply, Request, Target,
+    A11Y_FRAMES_VERSION, Answered, Appearance, DEFAULT_REFRESH_HZ, DRAG_BUTTON_VERSION,
+    DROP_VERSION, ErrorCode, LaunchParams, MODIFIERS_VERSION, MouseButton, Outcome,
+    PICK_FAIL_VERSION, PROTOCOL_VERSION, PickAnswer, PilotError, REFRESH_RATES_HZ, RESIZE_VERSION,
+    Reply, Request, Target,
 };
 use gpui_pilot_session::SessionError;
 use gpui_pilot_session::sandbox;
@@ -198,10 +199,26 @@ fn not_running() -> ToolError {
 
 /// Refuses, before anything reaches the host, a request that uses a field the host's protocol
 /// predates: `modifiers` on `click` and `drag` need a protocol 8 host, and a non-left `button`
-/// on `drag` a protocol 9 one, `drop` a protocol 10 one, `resize` a protocol 11 one and `a11y`
-/// on `frames` a protocol 12 one; an older host would close the connection on them or refuse
-/// them as unreadable.
+/// on `drag` a protocol 9 one, `drop` a protocol 10 one, `resize` a protocol 11 one, `a11y`
+/// on `frames` a protocol 12 one and `fail` on `pick_file` a protocol 13 one; an older host
+/// would close the connection on them or refuse them as unreadable.
 fn refuse_unsupported(request: &Request, host_version: u32) -> Result<(), ToolError> {
+    if matches!(
+        request,
+        Request::PickFile {
+            answer: PickAnswer::Fail(_),
+            ..
+        }
+    ) && host_version < PICK_FAIL_VERSION
+    {
+        return Err(ToolError::new(
+            ErrorCode::Unsupported,
+            format!(
+                "`fail` on pick_file needs a host built from v0.10.0 or later; \
+                 this host speaks protocol {host_version}"
+            ),
+        ));
+    }
     if matches!(request, Request::FramesStart { a11y: true, .. })
         && host_version < A11Y_FRAMES_VERSION
     {
@@ -423,6 +440,12 @@ impl Driver {
             }
             (Mode::Session, chosen) => chosen.unwrap_or(Network::None),
         };
+        // The session app reads the private KDE session's own colour scheme; nothing sets it.
+        if args.mode == Mode::Session && args.appearance.is_some() {
+            return Err(unsupported(
+                "`appearance` is headless only; omit it in session mode",
+            ));
+        }
         // Host ports only make sense through pasta; the X11 TCP ports would reach the desktop.
         let bad_ports = |why: &str| ToolError::new(ErrorCode::InvalidArgument, why);
         let never_pasta =
@@ -548,6 +571,7 @@ impl Driver {
             params.settle_ms = args.settle_ms;
             params.refresh_hz = rate;
             params.reused = reused;
+            params.appearance = args.appearance.map(Appearance::from).unwrap_or_default();
             if args.mode == Mode::Session {
                 let failed = |what: &str, e: std::io::Error| {
                     ToolError::new(ErrorCode::LaunchFailed, format!("{what}: {e}"))
@@ -941,7 +965,9 @@ mod tests {
     use crate::config::CONFIG_FILE;
     use crate::launch::ProcessGroup;
     use crate::launch::tests::short_temp;
-    use gpui_pilot_protocol::{A11Y_FRAMES_VERSION, Modifier, PickAnswer, Request};
+    use gpui_pilot_protocol::{
+        A11Y_FRAMES_VERSION, Modifier, PICK_FAIL_VERSION, PickAnswer, Request,
+    };
     use serde_json::json;
     use std::os::unix::process::CommandExt;
 
@@ -954,6 +980,28 @@ mod tests {
         let known = with_host_pid(reply, Some(4242));
         assert_eq!(known["host_pid"], json!(4242));
         assert_eq!(known["pid"], json!(7));
+    }
+
+    #[test]
+    fn a_failing_pick_is_refused_for_a_host_before_protocol_thirteen() {
+        let pick = |answer| Request::PickFile {
+            answer,
+            settle_ms: 0,
+            timeout_ms: None,
+        };
+        for old in [7, 12] {
+            let error = refuse_unsupported(&pick(PickAnswer::Fail("x".into())), old).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::Unsupported);
+            assert!(
+                error.error.message.contains("`fail`")
+                    && error.error.message.contains("v0.10.0")
+                    && error.error.message.contains(&format!("protocol {old}")),
+                "{}",
+                error.error.message
+            );
+            assert!(refuse_unsupported(&pick(PickAnswer::Cancel), old).is_ok());
+        }
+        assert!(refuse_unsupported(&pick(PickAnswer::Fail("x".into())), PICK_FAIL_VERSION).is_ok());
     }
 
     #[test]
@@ -1173,6 +1221,26 @@ mod tests {
             .launch(launch(json!({"mode": "headless", "network": "pasta"})))
             .unwrap_err();
         assert_eq!(error.code(), ErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn session_mode_refuses_an_appearance_before_its_preflight() {
+        let (driver, _root) = fixture(None);
+        let mut driver = driver.with_tool_path("/nonexistent".into());
+        for appearance in ["light", "dark"] {
+            let error = driver
+                .launch(launch(json!({"mode": "session", "appearance": appearance})))
+                .unwrap_err();
+            assert_eq!(error.code(), ErrorCode::Unsupported, "{appearance}");
+            assert!(
+                error.error.message.contains("headless only"),
+                "{}",
+                error.error.message
+            );
+        }
+        // Headless passes the check; the missing config is what fails.
+        let headless = driver.launch(launch(json!({"mode": "headless", "appearance": "light"})));
+        assert_eq!(headless.unwrap_err().code(), ErrorCode::InvalidConfig);
     }
 
     #[test]

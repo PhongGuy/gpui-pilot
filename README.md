@@ -27,6 +27,8 @@ There are two parts:
 
 The server starts your pilot binary (the one that calls `gpui_pilot_host::run`) as a child process. The app never connects to a display server: it gets no `DISPLAY` or `WAYLAND_DISPLAY`, its environment is cleared down to `PATH`, `LANG`, `RUST_LOG` and `RUST_BACKTRACE` (plus any `env` the launch passes), and it gets a private `HOME`, `XDG_*` directories and `TMPDIR` under `/tmp/gpui-pilot-<uid>/`. The host also points both D-Bus addresses at a socket that does not exist, so nothing in the process (the GPU driver, portal queries) reaches the user's session or system bus.
 
+The window and `cx.window_appearance()` both report the launch's `appearance`, `dark` unless `launch` asks for `light`, and it does not change while the app runs. Before v0.10.0 a default launch's window reported dark but `cx.window_appearance()` reported light; since v0.10.0 both report dark.
+
 Headless mode shares the host's network. It is fast, needs no desktop, and is the mode to use for most checks.
 
 The headless tree lists the elements an app registers for tests. It also lists the gpui-kit list rows an app does not register, such as the rows of an open `Select`, which it reads from GPUI's accessibility tree:
@@ -71,9 +73,9 @@ The sandbox holds only the launch's own folder, the app binary itself, the gpui-
 
 ### Protocol version
 
-The server and host agree on a protocol version in their first message. This release speaks protocol 12. The server still launches hosts back to protocol 7: it retries at the version the host names and answers `Unsupported` for the features an older host lacks (`a11y` on `frames` needs 12, `resize` needs 11, `drop` 10, a right or middle `drag` 9, `modifiers` on `click` and `drag` 8). To use a newer feature, move the app's `gpui-pilot-host` to the matching tag and rebuild the pilot binary.
+The server and host agree on a protocol version in their first message. This release speaks protocol 13. The server still launches hosts back to protocol 7: it retries at the version the host names and answers `Unsupported` for the features an older host lacks (`appearance: light` on `launch` and `fail` on `pick_file` need 13, `a11y` on `frames` 12, `resize` 11, `drop` 10, a right or middle `drag` 9, `modifiers` on `click` and `drag` 8). To use a newer feature, move the app's `gpui-pilot-host` to the matching tag and rebuild the pilot binary.
 
-Releases are git tags with a semver version, for example `v0.9.6`. Each release's host is built against one gpui-kit version: v0.1.0 against gpui-kit 0.7.1, v0.2.0 and v0.3.0 against 0.9.0, v0.3.1 to v0.5.0 against 0.9.1, v0.6.0 against 0.10.0, and v0.7.0 to v0.9.6 against 0.11.0. A move to a new gpui-kit is a minor version, since the app has to move with it. v0.1.0 to v0.8.1 speak protocol 11 and v0.9.0 to v0.9.6 speak 12. The server launches hosts back to protocol 7, so the newest installed server drives apps pinned to any of these tags; an older server cannot drive a newer host. A host newer than the server is refused with `ProtocolMismatch`; since v0.9.5 its message tells you to restart (reconnect) the MCP server or install the host's tag, while an older server passes on the host's own refusal, which only names both versions. A host older than protocol 7 is refused with `ProtocolMismatch` telling you to move the app's `gpui-pilot-host` to a newer tag.
+Releases are git tags with a semver version, for example `v0.10.0`. Each release's host is built against one gpui-kit version: v0.1.0 against gpui-kit 0.7.1, v0.2.0 and v0.3.0 against 0.9.0, v0.3.1 to v0.5.0 against 0.9.1, v0.6.0 against 0.10.0, and v0.7.0 to v0.10.0 against 0.11.0. A move to a new gpui-kit is a minor version, since the app has to move with it. v0.1.0 to v0.8.1 speak protocol 11, v0.9.0 to v0.9.6 speak 12, and v0.10.0 speaks 13. The server launches hosts back to protocol 7, so the newest installed server drives apps pinned to any of these tags; an older server cannot drive a newer host. A host newer than the server is refused with `ProtocolMismatch`; since v0.9.5 its message tells you to restart (reconnect) the MCP server or install the host's tag, while an older server passes on the host's own refusal, which only names both versions. A host older than protocol 7 is refused with `ProtocolMismatch` telling you to move the app's `gpui-pilot-host` to a newer tag.
 
 ## Requirements
 
@@ -93,7 +95,7 @@ Releases are git tags with a semver version, for example `v0.9.6`. Each release'
 ## Install the server
 
 ```sh
-cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.9.6 gpui-pilot
+cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.10.0 gpui-pilot
 ```
 
 This installs `gpui-pilot` into `~/.cargo/bin`. `gpui-pilot mcp` (or `gpui-pilot` with no argument) serves MCP over stdio, and `gpui-pilot --version` prints the installed version.
@@ -158,7 +160,7 @@ publish = false
 [dependencies]
 my-app = { path = "../../crates/my-app" }
 gpui-kit = "=0.11.0"
-gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.9.6" }
+gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.10.0" }
 anyhow = "1"
 
 # Optional: optimised dependencies make the app much faster under the pilot.
@@ -289,7 +291,7 @@ Actions wait for the target to be actionable (`timeout_ms`), then for the app to
 
 | Tool | What it does |
 | --- | --- |
-| `launch` | Build and start the configured app in `headless` or `session` mode, with window size, scale, `args`, `env`, network, `host_ports`, `refresh_hz`, `keep_data` and `project_dir` (a git worktree to launch from). The reply's `pid` is the app's pid as the host or sandbox sees it; `host_pid` is its pid on the server's machine (equal to `pid` headless, and left out in session mode when it cannot be found). |
+| `launch` | Build and start the configured app in `headless` or `session` mode, with window size, scale, `args`, `env`, network, `host_ports`, `refresh_hz`, `keep_data`, `project_dir` (a git worktree to launch from) and `appearance` (headless: `light` or `dark`, default `dark`). The reply's `pid` is the app's pid as the host or sandbox sees it; `host_pid` is its pid on the server's machine (equal to `pid` headless, and left out in session mode when it cannot be found). |
 | `tree` | List the elements, including canvas shapes an app publishes, with their paths, roles, names, values, states and bounds, optionally only `within` one element; `max_chars` shortens long runs of similar rows. The reply says whether the app settled first (`settled`) and how long that took (`settle_elapsed_ms`). |
 | `screenshot` | Capture the window, or one element, as a PNG. |
 | `click` | Click an element or point, with a button, a click count and held modifiers. |
@@ -302,7 +304,7 @@ Actions wait for the target to be actionable (`timeout_ms`), then for the app to
 | `resize` | Resize the window's content to a size in logical pixels without moving the pointer. |
 | `frames` | Start and stop a recording of the app's frames; the report gives frame intervals, frames over budget and wheel input latency. `a11y: true` (headless only) keeps GPUI's accessibility tree built on every recorded frame, so its cost shows in `work`. Read it as a delta between recordings with and without `a11y` on the same build: the host is a debug-assertions build, so absolute numbers are inflated, and the measured difference (about 0.2 to 0.55 ms more per frame for 1000 leaves in the timing profile) is too unstable to gate on. While it is on, a kit menu that focuses itself during prepaint can crash a debug app (`AppCrashed`). |
 | `dialog` | Read the GPUI prompt the app is showing, or answer it with a button label. |
-| `pick_file` | Answer the app's open or save file dialog with paths, or cancel it. |
+| `pick_file` | Answer the app's open or save file dialog with paths, cancel it, or make it fail with a message (headless). |
 | `clipboard` | Read the clipboard text, or replace it. |
 | `wait` | Wait for an element to appear or disappear, or wait a number of milliseconds. |
 | `close` | Close the app, by killing it or by closing its window as a window manager would (so the app can prompt), optionally keeping its data for the next launch. |
@@ -330,6 +332,7 @@ printf '%s\n' 'launch {"mode": "headless"}' \
 - The headless host and the session binary must be debug builds.
 - One app per server at a time; launching another while one runs needs `replace: true`.
 - `drop` is headless only.
+- `appearance` on `launch` and `fail` on `pick_file` are headless only; session mode refuses them with `Unsupported`. `appearance: light` and `fail` need a v0.10.0 host, while `dark` works with any.
 - `frames` with `a11y` is headless only; session mode refuses it with `Unsupported`.
 - In session mode a debug app that animates every frame from its first frame cannot answer accessibility requests, so its launch fails after about 20 s naming that; launch an optimised build or start the animation after launch.
 - In session mode an app whose large accessibility tree moves every frame (about 1000 panning canvas shapes in a debug build, about 4000 in an optimised one) leaves its accessibility thread behind and its memory grows while the motion lasts. Tree reads (`tree`, `wait`, id targets) answer `Timeout` until the motion stops, so use point targets and screenshots while it moves. The AT-SPI registry may stop listing such an app; the pilot finds it by its pid and reads it again as soon as it answers. When several accessibility connections share that pid, tree reads also answer `Timeout`, until the registry lists the app again; `NotRunning` still means no connection with the pid exists.

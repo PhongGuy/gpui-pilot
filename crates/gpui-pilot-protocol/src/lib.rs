@@ -15,7 +15,7 @@ pub mod stats;
 pub use stats::{BuildInfo, FrameReport, Recorder, Spread};
 
 /// The protocol revision both ends must agree on in `hello`.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 /// The first protocol whose hosts accept `a11y` on `frames_start`.
 pub const A11Y_FRAMES_VERSION: u32 = 12;
 
@@ -35,6 +35,12 @@ pub const DROP_VERSION: u32 = 10;
 
 /// The first protocol whose hosts accept `resize`.
 pub const RESIZE_VERSION: u32 = 11;
+
+/// The first protocol whose hosts read `appearance` in `LaunchParams`.
+pub const APPEARANCE_VERSION: u32 = 13;
+
+/// The first protocol whose hosts accept `PickAnswer::Fail`.
+pub const PICK_FAIL_VERSION: u32 = 13;
 
 /// What a client logs, and the server reports, in place of text typed with redaction.
 pub fn redacted(text: &str) -> String {
@@ -182,6 +188,8 @@ impl MouseButton {
 pub enum PickAnswer {
     Paths(Vec<PathBuf>),
     Cancel,
+    /// Resolve the prompt to an error carrying this message.
+    Fail(String),
 }
 
 #[non_exhaustive]
@@ -201,6 +209,7 @@ pub enum Answered {
     Save,
     Queued,
     Cancelled,
+    Failed,
 }
 
 /// The file prompt the app opened, as far as the host can describe it.
@@ -277,6 +286,26 @@ pub struct LaunchParams {
     /// The rate the app's window refreshes at, one of `REFRESH_RATES_HZ`.
     #[serde(default = "default_refresh_hz")]
     pub refresh_hz: u32,
+    /// The system appearance the window reports; left out of the frame when dark, so a dark
+    /// launch stays the protocol 12 frame.
+    #[serde(default, skip_serializing_if = "Appearance::is_dark")]
+    pub appearance: Appearance,
+}
+
+/// The system appearance a headless window reports.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Appearance {
+    Light,
+    #[default]
+    Dark,
+}
+
+impl Appearance {
+    fn is_dark(&self) -> bool {
+        *self == Appearance::Dark
+    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -288,8 +317,8 @@ fn default_refresh_hz() -> u32 {
 }
 
 impl LaunchParams {
-    /// Launch parameters with the default 250 ms settle horizon, a 5000 ms launch settle and the
-    /// default refresh rate.
+    /// Launch parameters with the default 250 ms settle horizon, a 5000 ms launch settle, the
+    /// default refresh rate and the dark appearance.
     pub fn new(width: f32, height: f32, scale: f32, data_dir: PathBuf, args: Vec<String>) -> Self {
         Self {
             width,
@@ -301,6 +330,7 @@ impl LaunchParams {
             settle_ms: 5000,
             reused: false,
             refresh_hz: DEFAULT_REFRESH_HZ,
+            appearance: Appearance::Dark,
         }
     }
 }

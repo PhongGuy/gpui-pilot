@@ -83,6 +83,18 @@ where
     run_demo(platform, pilot_demo::open, body)
 }
 
+/// Runs pilot-demo at 640x400, scale 1 and 60 Hz on a platform launched with `appearance`.
+pub fn with_demo_in<F, Fut, R>(appearance: gpui_kit::WindowAppearance, body: F) -> R
+where
+    F: FnOnce(Harness) -> Fut + 'static,
+    Fut: Future<Output = R> + 'static,
+    R: Send + 'static,
+{
+    let platform = PilotPlatform::new(size(px(640.), px(400.)), 1.0, 60);
+    platform.set_appearance(appearance);
+    run_demo(platform, pilot_demo::open, body)
+}
+
 /// Runs pilot-demo with its window placed at `origin` on the screen, as a desktop app's
 /// remembered or cascaded window is; content coordinates still start at the window's corner.
 pub fn with_demo_placed<F, Fut, R>(width: f32, height: f32, origin: Point<Pixels>, body: F) -> R

@@ -2,10 +2,10 @@ use std::io::Cursor;
 use std::time::{Duration, Instant};
 
 use gpui_pilot_protocol::{
-    Answered, BackendFrame, BuildInfo, ClientFrame, DEFAULT_REFRESH_HZ, DialogInfo, DialogLevel,
-    ErrorCode, FrameError, LaunchParams, Modifier, MouseButton, Node, Outcome, PROTOCOL_VERSION,
-    PickAnswer, PilotError, PromptInfo, PromptKind, REFRESH_RATES_HZ, Recorder, Rect, Reply,
-    Request, Segment, Target, WaitUntil, Wheel, WindowInfo, read_line, write_line,
+    Answered, Appearance, BackendFrame, BuildInfo, ClientFrame, DEFAULT_REFRESH_HZ, DialogInfo,
+    DialogLevel, ErrorCode, FrameError, LaunchParams, Modifier, MouseButton, Node, Outcome,
+    PROTOCOL_VERSION, PickAnswer, PilotError, PromptInfo, PromptKind, REFRESH_RATES_HZ, Recorder,
+    Rect, Reply, Request, Segment, Target, WaitUntil, Wheel, WindowInfo, read_line, write_line,
 };
 use serde_json::{Value, json};
 
@@ -785,7 +785,6 @@ fn a_tree_reply_carries_its_settle_and_an_older_one_omits_it() {
 
 #[test]
 fn version_twelve_records_frames_with_accessibility_on() {
-    assert_eq!(PROTOCOL_VERSION, 12);
     assert_eq!(gpui_pilot_protocol::A11Y_FRAMES_VERSION, 12);
     let on = Request::FramesStart {
         idle_ms: 100,
@@ -829,5 +828,71 @@ fn version_twelve_records_frames_with_accessibility_on() {
     assert_eq!(
         serde_json::from_value::<Reply>(value).unwrap(),
         Reply::Frames(report)
+    );
+}
+
+#[test]
+fn version_thirteen_carries_the_appearance_and_a_failing_pick() {
+    assert_eq!(PROTOCOL_VERSION, 13);
+    assert_eq!(gpui_pilot_protocol::APPEARANCE_VERSION, 13);
+    assert_eq!(gpui_pilot_protocol::PICK_FAIL_VERSION, 13);
+
+    let mut launch = LaunchParams::new(640.0, 400.0, 1.0, "/d".into(), Vec::new());
+    assert_eq!(launch.appearance, Appearance::Dark);
+    let value = serde_json::to_value(&launch).unwrap();
+    assert!(
+        value.get("appearance").is_none(),
+        "a dark launch is the protocol 12 frame: {value}"
+    );
+    assert_eq!(
+        serde_json::from_value::<LaunchParams>(value)
+            .unwrap()
+            .appearance,
+        Appearance::Dark,
+        "an absent appearance means dark"
+    );
+    launch.appearance = Appearance::Light;
+    let value = serde_json::to_value(&launch).unwrap();
+    assert_eq!(value["appearance"], json!("light"));
+    assert_eq!(
+        serde_json::from_value::<LaunchParams>(value).unwrap(),
+        launch
+    );
+    let mut dark = serde_json::to_value(&launch).unwrap();
+    dark["appearance"] = json!("dark");
+    assert_eq!(
+        serde_json::from_value::<LaunchParams>(dark)
+            .unwrap()
+            .appearance,
+        Appearance::Dark
+    );
+
+    let fail = PickAnswer::Fail("disk gone".into());
+    assert_eq!(
+        serde_json::to_value(&fail).unwrap(),
+        json!({"fail": "disk gone"})
+    );
+    let pick = Request::PickFile {
+        answer: fail,
+        settle_ms: 0,
+        timeout_ms: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&pick).unwrap(),
+        json!({"op": "pick_file", "answer": {"fail": "disk gone"}, "settle_ms": 0})
+    );
+    round_trip(pick);
+    assert_eq!(
+        serde_json::to_value(Answered::Failed).unwrap(),
+        json!("failed")
+    );
+    let reply = Reply::PickFile {
+        answered: Answered::Failed,
+        prompt: Some(PromptInfo::new(PromptKind::Open, false)),
+        settled: true,
+    };
+    assert_eq!(
+        serde_json::from_value::<Reply>(serde_json::to_value(&reply).unwrap()).unwrap(),
+        reply
     );
 }
