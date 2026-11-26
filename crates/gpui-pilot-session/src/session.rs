@@ -506,6 +506,21 @@ impl Session {
         })
     }
 
+    /// The app's nodes as `tree`, and which walk read them; for the session crate's tests.
+    #[doc(hidden)]
+    pub fn tree_walked(
+        &mut self,
+        pid: u32,
+        force_fallback: bool,
+    ) -> Result<(Vec<Node>, crate::Walked), SessionError> {
+        let a11y = self.a11y.clone();
+        let scale = self.output.scale;
+        let deadline = Instant::now() + crate::tree::WALK_LIMIT;
+        crate::tree::walked(&a11y, pid, scale, deadline, force_fallback, || {
+            self.window(pid).map(|g| g.content())
+        })
+    }
+
     /// Captures the whole output at native resolution.
     pub fn capture(&mut self) -> Result<Capture, SessionError> {
         let (mut reader, writer) = std::io::pipe()?;

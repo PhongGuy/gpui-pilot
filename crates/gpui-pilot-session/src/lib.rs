@@ -20,3 +20,5 @@ mod tree;
 
 pub use error::SessionError;
 pub use session::{Capture, PromptAnswer, Session, WindowGeometry};
+#[doc(hidden)]
+pub use tree::Walked;

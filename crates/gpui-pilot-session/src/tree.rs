@@ -8,8 +8,8 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use atspi_common::{CacheItem, CoordType, ObjectRefOwned, State, StateSet};
-use atspi_proxies::accessible::AccessibleProxyBlocking;
-use atspi_proxies::component::ComponentProxyBlocking;
+use atspi_proxies::accessible::{AccessibleProxy, AccessibleProxyBlocking};
+use atspi_proxies::component::{ComponentProxy, ComponentProxyBlocking};
 use gpui_pilot_protocol::{Node, Rect, Segment};
 use zbus::blocking::Connection;
 use zbus::proxy::CacheProperties;
@@ -30,6 +30,15 @@ pub(crate) const CALL_LIMIT: Duration = Duration::from_secs(2);
 /// The longest one tree walk may take.
 pub(crate) const WALK_LIMIT: Duration = Duration::from_secs(10);
 
+/// Which path a walk took: the AT-SPI cache, or today's per-node walk.
+#[doc(hidden)]
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Walked {
+    Cache,
+    Fallback,
+}
+
 /// Walks every node below `pid`'s application object, sorted by top, left, then path.
 /// `content` supplies the client area relative to the surface origin: its size bounds the frame,
 /// which AT-SPI reports as `(-1, -1, -1, -1)`, and its origin moves extents into the client.
@@ -40,19 +49,46 @@ pub(crate) fn walk(
     deadline: Instant,
     content: impl FnOnce() -> Result<Rect, SessionError>,
 ) -> Result<Vec<Node>, SessionError> {
+    walked(a11y, pid, scale, deadline, false, content).map(|(nodes, _)| nodes)
+}
+
+/// As `walk`, also saying which path it took; `force_fallback` skips the cache.
+pub(crate) fn walked(
+    a11y: &Connection,
+    pid: u32,
+    scale: f32,
+    deadline: Instant,
+    force_fallback: bool,
+    content: impl FnOnce() -> Result<Rect, SessionError>,
+) -> Result<(Vec<Node>, Walked), SessionError> {
     let (name, path) = application(a11y, pid)?;
-    let found = collect(
-        path,
-        deadline,
-        |path| {
-            let children = accessible(a11y, &name, path)?.get_children()?;
-            Ok(children
-                .iter()
-                .map(|c| c.path_as_str().to_owned())
-                .collect())
-        },
-        |path, indices| read(a11y, &accessible(a11y, &name, path)?, &name, path, indices),
-    )?;
+    // The cache answers structure in one call; an app without a usable one takes the per-node
+    // walk on the same deadline.
+    let cached = if force_fallback {
+        None
+    } else {
+        let read = Cell::new(0);
+        let work = cached(a11y.inner(), &name, &path, &read);
+        async_io::block_on(by_deadline(work, deadline, &read))?
+    };
+    let (found, walked) = match cached {
+        Some(found) => (found, Walked::Cache),
+        None => {
+            let found = collect(
+                path,
+                deadline,
+                |path| {
+                    let children = accessible(a11y, &name, path)?.get_children()?;
+                    Ok(children
+                        .iter()
+                        .map(|c| c.path_as_str().to_owned())
+                        .collect())
+                },
+                |path, indices| read(a11y, &accessible(a11y, &name, path)?, &name, path, indices),
+            )?;
+            (found, Walked::Fallback)
+        }
+    };
     // AT-SPI counts from the wl_surface, which a client-side decoration's shadow pads beyond
     // the client area that points and captures use; one KWin script reads that inset.
     let content = content()?;
@@ -66,7 +102,106 @@ pub(crate) fn walk(
             .then(a.bounds.x.total_cmp(&b.bounds.x))
             .then_with(|| a_path.cmp(b_path))
     });
-    Ok(nodes.into_iter().map(|(_, node)| node).collect())
+    Ok((nodes.into_iter().map(|(_, node)| node).collect(), walked))
+}
+
+/// The app's nodes from one `GetItems` snapshot plus each node's id and extents, `WINDOW` nodes
+/// in flight; `Ok(None)` when the app has no usable cache. Counts nodes read in `read`.
+async fn cached(
+    conn: &zbus::Connection,
+    name: &str,
+    app_path: &str,
+    read: &Cell<usize>,
+) -> Result<Option<Vec<Raw>>, SessionError> {
+    let reply = conn
+        .call_method(
+            Some(name),
+            CACHE_PATH,
+            Some(CACHE_INTERFACE),
+            "GetItems",
+            &(),
+        )
+        .await;
+    let Some(items) = cache_reply(reply)? else {
+        return Ok(None);
+    };
+    let Some(found) = snapshot((name, app_path), items) else {
+        return Ok(None);
+    };
+    let calls = found
+        .iter()
+        .map(|(_, item)| read_node(conn, name, item.object.path_as_str()))
+        .collect();
+    let answers = match window(calls, WINDOW, read).await {
+        Ok(answers) => answers,
+        Err(error) if not_answering(&error) => return Err(unanswered()),
+        Err(error) => return Err(error.into()),
+    };
+    let answered: Vec<_> = found
+        .into_iter()
+        .zip(answers)
+        .map(|((indices, item), answer)| (indices, answer.map(|ids| (item, ids))))
+        .collect();
+    Ok(Some(
+        skip_vanished(answered)
+            .into_iter()
+            .map(|(indices, (item, (id, extents)))| Raw {
+                indices,
+                id,
+                role: format!("{:?}", item.role),
+                name: item.short_name,
+                extents,
+                state: item.states,
+            })
+            .collect(),
+    ))
+}
+
+/// One node's id and Window extents, both calls in flight together; `Ok(None)` when either
+/// answers UnknownObject; a missing Component interface reads as no extents.
+async fn read_node(
+    conn: &zbus::Connection,
+    name: &str,
+    path: &str,
+) -> zbus::Result<Option<(String, Option<(i32, i32, i32, i32)>)>> {
+    // Building a proxy without cached properties sends nothing; only the two reads go out.
+    let accessible = AccessibleProxy::builder(conn)
+        .destination(name)?
+        .path(path)?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
+    let component = ComponentProxy::builder(conn)
+        .destination(name)?
+        .path(path)?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
+    let reads = futures_lite::future::try_zip(accessible.accessible_id(), async {
+        without_interface(component.get_extents(CoordType::Window).await)
+    });
+    match reads.await {
+        Ok(answer) => Ok(Some(answer)),
+        Err(error) if vanished(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Drops every `None` entry and every entry whose path extends a `None` entry's path.
+fn skip_vanished<T>(found: Vec<(Vec<u64>, Option<T>)>) -> Vec<(Vec<u64>, T)> {
+    // Entries arrive sorted by path, so a gone node's subtree follows it directly.
+    let mut gone: Option<Vec<u64>> = None;
+    let mut kept = Vec::with_capacity(found.len());
+    for (path, value) in found {
+        if gone.as_ref().is_some_and(|g| path.starts_with(g)) {
+            continue;
+        }
+        match value {
+            Some(value) => kept.push((path, value)),
+            None => gone = Some(path),
+        }
+    }
+    kept
 }
 
 /// Depth-first from the application object at `root`, reading each node below it with its
@@ -1058,5 +1193,26 @@ mod tests {
             &Cell::new(0),
         ));
         assert_eq!(quick.unwrap(), 7);
+    }
+
+    #[test]
+    fn a_node_vanishing_during_its_reads_drops_its_snapshot_subtree() {
+        let found = vec![
+            (vec![0], Some("frame")),
+            (vec![0, 0], None),
+            (vec![0, 0, 0], Some("under the gone node")),
+            (vec![0, 0, 0, 1], Some("deeper under it")),
+            (vec![0, 1], Some("its sibling")),
+            (vec![1], Some("beside the frame")),
+        ];
+        let kept: Vec<_> = skip_vanished(found).into_iter().collect();
+        assert_eq!(
+            kept,
+            vec![
+                (vec![0], "frame"),
+                (vec![0, 1], "its sibling"),
+                (vec![1], "beside the frame")
+            ]
+        );
     }
 }
