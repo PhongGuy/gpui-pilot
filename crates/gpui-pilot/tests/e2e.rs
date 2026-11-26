@@ -191,6 +191,16 @@ async fn host_errors_replacement_and_a_crash_map_to_codes() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_headless_launch_reports_its_pid_as_the_host_pid() {
+    let pilot = Pilot::start(Some(&config())).await;
+    let launched = pilot.ok("launch", launch_args()).await;
+    let pid = launched["pid"].as_u64().unwrap();
+    assert_eq!(launched["host_pid"], json!(pid), "{launched}");
+    assert!(alive(pid));
+    pilot.ok("close", json!({})).await;
+}
+
 #[tokio::test]
 async fn build_and_start_failures_carry_the_log_tail() {
     let config = "[headless]\nbuild = [\"sh\", \"-c\", \"echo compiling; echo 'error[E0425]' >&2; exit 101\"]\nbinary = \"/usr/bin/true\"\n";
@@ -971,6 +981,35 @@ async fn a_protocol_seven_host_still_launches_and_clicks_and_modifiers_are_refus
     );
     assert!(!requests.contains(r#""version":8"#), "{requests}");
     assert_eq!(requests.matches(r#""op":"click""#).count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newer_host_is_refused_once_naming_a_server_restart() {
+    let scripts = tempfile::tempdir().unwrap();
+    let newer = PROTOCOL_VERSION + 1;
+    let host = old_host(scripts.path(), newer);
+    let pilot = Pilot::start(Some(&format!(
+        "[headless]\nbinary = \"{}\"\n",
+        host.display()
+    )))
+    .await;
+    let refused = pilot.err("launch", launch_args()).await;
+    assert_eq!(refused["code"], json!("ProtocolMismatch"));
+    let message = refused["message"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("speaks protocol {newer}"))
+            && message.contains("Restart (reconnect) the MCP server"),
+        "{message}"
+    );
+    assert_eq!(refused["host_version"], json!(newer));
+    assert_eq!(refused["server_version"], json!(PROTOCOL_VERSION));
+    assert!(refused["log_tail"].is_string(), "{refused}");
+    let requests = std::fs::read_to_string(scripts.path().join("requests")).unwrap();
+    assert_eq!(
+        requests.matches(r#""op":"hello""#).count(),
+        1,
+        "a newer host is not retried: {requests}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
