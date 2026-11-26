@@ -576,6 +576,7 @@ impl Agent {
     /// compared, so animated leaves do not block launch. `LaunchFailed` stage `atspi` at `deadline`.
     fn wait_stable_tree(&mut self, deadline: Instant) -> Result<(), SessionError> {
         let mut last: Option<Vec<Node>> = None;
+        let mut unanswered = None;
         loop {
             let why = match self.session.tree_until(self.app.pid(), deadline) {
                 Ok(nodes) => {
@@ -589,12 +590,7 @@ impl Agent {
                     last = Some(nodes);
                     why.to_owned()
                 }
-                Err(error @ SessionError::Unanswered(_)) => format!(
-                    "{error}; an app not answering at launch is usually a debug build busy \
-                     drawing every frame, which cannot answer: launch an optimised build or start \
-                     animation after launch"
-                ),
-                Err(error) => error.to_string(),
+                Err(error) => failed_walk_why(error, &mut unanswered),
             };
             if Instant::now() >= deadline {
                 return Err(SessionError::LaunchFailed {
@@ -1239,9 +1235,50 @@ fn request_error(error: SessionError, app_exited: bool) -> Option<PilotError> {
     })
 }
 
+/// Why a launch walk failed, for `LaunchFailed`. An `Unanswered` walk is remembered in
+/// `unanswered` with the build advice, and a later walk that only overran (`Timeout`, started
+/// with under `CALL_LIMIT` left) reports that cause instead of its own.
+fn failed_walk_why(error: SessionError, unanswered: &mut Option<String>) -> String {
+    match error {
+        error @ SessionError::Unanswered(_) => unanswered
+            .insert(format!(
+                "{error}; an app not answering at launch is usually a debug build busy drawing \
+                 every frame, which cannot answer: launch an optimised build or start animation \
+                 after launch"
+            ))
+            .clone(),
+        SessionError::Timeout(_) if let Some(why) = unanswered => why.clone(),
+        error => error.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_walk_that_only_overran_after_an_unanswered_one_still_names_the_unanswered_app() {
+        let unanswered = || SessionError::Unanswered("the app did not answer".into());
+        let overran = || SessionError::Timeout("passed its deadline after 0 nodes".into());
+        let mut seen = None;
+        assert!(failed_walk_why(unanswered(), &mut seen).contains("not answering"));
+        let why = failed_walk_why(overran(), &mut seen);
+        assert!(why.contains("the app did not answer"), "{why}");
+        assert!(why.contains("not answering"), "{why}");
+
+        // Without an unanswered attempt, an overrun reports itself, and other errors always do.
+        let mut none = None;
+        let why = failed_walk_why(overran(), &mut none);
+        assert!(!why.contains("not answering"), "{why}");
+        let other = failed_walk_why(
+            SessionError::LaunchFailed {
+                stage: "x",
+                message: "gone".into(),
+            },
+            &mut seen,
+        );
+        assert_eq!(other, "stage x: gone");
+    }
 
     #[test]
     fn a_live_process_in_the_apps_session_counts_as_left_behind() {
