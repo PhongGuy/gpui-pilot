@@ -1254,3 +1254,98 @@ async fn frames_with_a11y_report_it_and_a_protocol_eleven_host_refuses_it() {
     let requests = std::fs::read_to_string(scripts.path().join("requests")).unwrap();
     assert!(!requests.contains(r#""op":"frames_start""#), "{requests}");
 }
+
+/// The name of the element whose path ends in `id`, read through `tree`; `None` when absent.
+async fn readout(pilot: &Pilot, id: &str) -> Option<Value> {
+    let tree = pilot.ok("tree", json!({})).await;
+    tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| ends_with(&n["path"], id))
+        .map(|n| n["name"].clone())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_light_launch_and_a_failing_pick_reach_pilot_demo_and_a_protocol_twelve_host_refuses_both()
+ {
+    let pilot = Pilot::start(Some(&config())).await;
+    let mut shown = launch_args();
+    shown["args"] = json!(["--show-appearance"]);
+    let mut light = shown.clone();
+    light["appearance"] = json!("light");
+    pilot.ok("launch", light).await;
+    assert_eq!(
+        readout(&pilot, "appearance").await,
+        Some(json!("Appearance light"))
+    );
+    pilot.ok("close", json!({})).await;
+    pilot.ok("launch", shown).await;
+    assert_eq!(
+        readout(&pilot, "appearance").await,
+        Some(json!("Appearance dark"))
+    );
+    assert_eq!(readout(&pilot, "prompt-error").await, None);
+
+    pilot.ok("click", json!({"target": id("open")})).await;
+    let failed = pilot
+        .result("pick_file", json!({"fail": "disk gone"}))
+        .await;
+    let value = failed.structured_content.clone().unwrap();
+    assert_eq!(value["answered"], json!("failed"), "{value}");
+    assert_eq!(value["prompt"]["kind"], json!("open"));
+    assert_eq!(
+        common::text(&failed),
+        "pick_file: failed the open dialog; settled"
+    );
+    assert_eq!(
+        readout(&pilot, "prompt-error").await,
+        Some(json!("Prompt error: disk gone"))
+    );
+    let queued = pilot.ok("pick_file", json!({"fail": "read-only"})).await;
+    assert_eq!(queued["answered"], json!("queued"));
+    pilot.ok("click", json!({"target": id("save")})).await;
+    assert_eq!(
+        readout(&pilot, "prompt-error").await,
+        Some(json!("Prompt error: read-only"))
+    );
+    pilot.ok("close", json!({})).await;
+
+    let scripts = tempfile::tempdir().unwrap();
+    let host = old_host(scripts.path(), 12);
+    let old = Pilot::start(Some(&format!(
+        "[headless]\nbinary = \"{}\"\n",
+        host.display()
+    )))
+    .await;
+    let mut light = launch_args();
+    light["appearance"] = json!("light");
+    let refused = old.err("launch", light).await;
+    assert_eq!(refused["code"], json!("Unsupported"));
+    let text = refused["message"].as_str().unwrap();
+    assert!(
+        text.contains("v0.10.0") && text.contains("protocol 12"),
+        "{text}"
+    );
+    old.ok("launch", launch_args()).await;
+    let refused = old.err("pick_file", json!({"fail": "x"})).await;
+    assert_eq!(refused["code"], json!("Unsupported"));
+    let text = refused["message"].as_str().unwrap();
+    assert!(
+        text.contains("v0.10.0") && text.contains("protocol 12"),
+        "{text}"
+    );
+    old.ok("close", json!({})).await;
+    let requests = std::fs::read_to_string(scripts.path().join("requests")).unwrap();
+    assert_eq!(
+        requests.matches(r#""op":"hello""#).count(),
+        3,
+        "the light launch was not retried: {requests}"
+    );
+    assert_eq!(
+        requests.matches(r#""appearance""#).count(),
+        1,
+        "only the refused protocol 13 hello carried it: {requests}"
+    );
+    assert!(!requests.contains(r#""op":"pick_file""#), "{requests}");
+}
