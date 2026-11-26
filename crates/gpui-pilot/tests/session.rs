@@ -219,12 +219,49 @@ async fn drives_the_windowed_demo_in_a_private_session() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_session_launch_names_the_apps_pid_on_the_host() {
+    if !session_tests(Network::None) {
+        return;
+    }
+    let pilot = Pilot::start(Some(&config())).await;
+    let launched = pilot.ok("launch", launch("none")).await;
+    let dir = launch_dir(&launched);
+    let pid = launched["pid"].as_u64().unwrap();
+    let host_pid = launched["host_pid"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no host_pid: {launched}"));
+    assert_ne!(host_pid, pid, "the sandbox has a pid namespace of its own");
+    let status = std::fs::read_to_string(format!("/proc/{host_pid}/status")).unwrap();
+    let nspid: Vec<u64> = status
+        .lines()
+        .find_map(|line| line.strip_prefix("NSpid:"))
+        .unwrap()
+        .split_whitespace()
+        .map(|p| p.parse().unwrap())
+        .collect();
+    assert_eq!(nspid.first(), Some(&host_pid), "{status}");
+    assert_eq!(nspid.last(), Some(&pid), "{status}");
+    let comm = std::fs::read_to_string(format!("/proc/{host_pid}/comm")).unwrap();
+    assert_eq!(comm.trim_end(), "pilot-demo-wind");
+    let inside = descendants(pilot.server_pid);
+    assert!(inside.contains(&(host_pid as u32)), "{inside:?}");
+    pilot.ok("close", json!({})).await;
+    assert_no_leaks(&pilot, inside, &dir).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_pasta_network_mode_drives_and_tears_down_too() {
     if !session_tests(Network::Pasta) {
         return;
     }
     let pilot = Pilot::start(Some(&config())).await;
-    let dir = launch_dir(&pilot.ok("launch", launch("pasta")).await);
+    let launched = pilot.ok("launch", launch("pasta")).await;
+    let dir = launch_dir(&launched);
+    let host_pid = launched["host_pid"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no host_pid under pasta: {launched}"));
+    let comm = std::fs::read_to_string(format!("/proc/{host_pid}/comm")).unwrap();
+    assert_eq!(comm.trim_end(), "pilot-demo-wind");
     let clicked = pilot
         .ok("click", json!({"target": {"id": ["count"]}}))
         .await;

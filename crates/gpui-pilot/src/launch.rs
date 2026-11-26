@@ -400,6 +400,11 @@ impl ProcessGroup {
     pub fn child(&mut self) -> &mut Child {
         &mut self.0
     }
+
+    /// The group leader's pid (the host, or the sandbox's outermost process).
+    pub fn id(&self) -> u32 {
+        self.0.id()
+    }
 }
 
 impl Drop for ProcessGroup {

@@ -11,7 +11,6 @@ mod driver;
 mod error;
 mod launch;
 mod params;
-#[expect(dead_code)]
 mod procs;
 mod project;
 mod redact;

@@ -191,6 +191,16 @@ async fn host_errors_replacement_and_a_crash_map_to_codes() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_headless_launch_reports_its_pid_as_the_host_pid() {
+    let pilot = Pilot::start(Some(&config())).await;
+    let launched = pilot.ok("launch", launch_args()).await;
+    let pid = launched["pid"].as_u64().unwrap();
+    assert_eq!(launched["host_pid"], json!(pid), "{launched}");
+    assert!(alive(pid));
+    pilot.ok("close", json!({})).await;
+}
+
 #[tokio::test]
 async fn build_and_start_failures_carry_the_log_tail() {
     let config = "[headless]\nbuild = [\"sh\", \"-c\", \"echo compiling; echo 'error[E0425]' >&2; exit 101\"]\nbinary = \"/usr/bin/true\"\n";

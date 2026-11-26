@@ -360,8 +360,9 @@ impl Driver {
         self.running.as_ref().map_or(&self.root, |r| &r.project)
     }
 
-    /// `{ mode, network, pid, window: { w, h, scale }, data_dir, reused, build_ms, start_ms,
-    /// refresh_hz, settled }`; `refresh_hz` is the rate the display really runs at.
+    /// `{ mode, network, pid, host_pid, window: { w, h, scale }, data_dir, reused, build_ms,
+    /// start_ms, refresh_hz, settled }`; `refresh_hz` is the rate the display really runs at,
+    /// `host_pid` the app's pid in the server's pid namespace, absent when it cannot be found.
     pub fn launch(&mut self, args: LaunchArgs) -> Result<Value, ToolError> {
         // Bad arguments fail before anything touches the running app or the config.
         if args.settle_ms > MAX_LAUNCH_SETTLE_MS {
@@ -612,7 +613,13 @@ impl Driver {
                 None => stage,
             }
         });
-        let result = json!({
+        // Session apps run in the sandbox's pid namespace; one /proc pass finds their outer pid.
+        let host_pid = match args.mode {
+            Mode::Session => crate::procs::host_pid(host.group.id(), host.pid),
+            _ => Some(host.pid),
+        };
+        let result = with_host_pid(
+            json!({
             "mode": args.mode,
             "network": network,
             "pid": host.pid,
@@ -623,7 +630,9 @@ impl Driver {
             "start_ms": start_ms,
             "refresh_hz": host.refresh_mhz as f64 / 1000.0,
             "settled": host.settled,
-        });
+            }),
+            host_pid,
+        );
         // Only a started host ends the old app, so only then do its secrets stop mattering.
         self.secrets.clear();
         self.running = Some(Running {
@@ -916,6 +925,15 @@ impl Driver {
     }
 }
 
+/// `result` with `host_pid` added when known; unchanged (the key absent) when `None`, since
+/// `json!` would write `null`.
+fn with_host_pid(mut result: Value, host_pid: Option<u32>) -> Value {
+    if let Some(pid) = host_pid {
+        result["host_pid"] = json!(pid);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,6 +944,17 @@ mod tests {
     use gpui_pilot_protocol::{A11Y_FRAMES_VERSION, Modifier, PickAnswer, Request};
     use serde_json::json;
     use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn an_unknown_host_pid_is_left_out_and_a_known_one_added() {
+        let reply = json!({"mode": "session", "pid": 7});
+        let unknown = with_host_pid(reply.clone(), None);
+        assert_eq!(unknown, reply);
+        assert!(unknown.get("host_pid").is_none(), "{unknown}");
+        let known = with_host_pid(reply, Some(4242));
+        assert_eq!(known["host_pid"], json!(4242));
+        assert_eq!(known["pid"], json!(7));
+    }
 
     #[test]
     fn frames_with_a11y_is_refused_for_a_host_before_protocol_twelve() {
