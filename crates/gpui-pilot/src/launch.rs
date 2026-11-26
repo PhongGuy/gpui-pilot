@@ -12,8 +12,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use gpui_pilot_protocol::{
-    ErrorCode, LaunchParams, MIN_HOST_VERSION, Outcome, PROTOCOL_VERSION, PilotError, Reply,
-    Request, WindowInfo,
+    APPEARANCE_VERSION, Appearance, ErrorCode, LaunchParams, MIN_HOST_VERSION, Outcome,
+    PROTOCOL_VERSION, PilotError, Reply, Request, WindowInfo,
 };
 use gpui_pilot_session::sandbox::{self, Bind, Network, Output, Sandbox};
 use rustix::fs::OFlags;
@@ -513,6 +513,7 @@ pub(crate) fn spawn_host(
                 Mismatch::Retry(version) => version,
                 Mismatch::Refuse(error) => return Err(*error),
             };
+            refuse_retry(&params, version)?;
             // The refused host left its socket file behind; the retry binds the path again.
             let _ = std::fs::remove_file(dir.socket());
             let command = host_command(section, root, dir, &params, env);
@@ -520,6 +521,21 @@ pub(crate) fn spawn_host(
         }
         started => started,
     }
+}
+
+/// Refuses to retry a launch at `version` when the host would silently drop a field it uses.
+fn refuse_retry(params: &LaunchParams, version: u32) -> Result<(), ToolError> {
+    // A pre-13 host ignores the unknown field and would report dark while the agent asked for light.
+    if params.appearance == Appearance::Light && version < APPEARANCE_VERSION {
+        return Err(ToolError::new(
+            ErrorCode::Unsupported,
+            format!(
+                "`appearance: light` needs a host built from v0.10.0 or later; \
+                 this host speaks protocol {version}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The protocol a host named in its `ProtocolMismatch` refusal ("..., this host speaks N",
@@ -731,6 +747,30 @@ pub(crate) mod tests {
             format!("the server speaks version {PROTOCOL_VERSION}, this host speaks {host}"),
         )
         .with("log_tail", "host log")
+    }
+
+    #[test]
+    fn a_light_launch_is_not_retried_on_a_host_before_protocol_thirteen() {
+        let mut params = LaunchParams::new(640.0, 400.0, 1.0, "/d".into(), Vec::new());
+        for old in [MIN_HOST_VERSION, 12] {
+            assert!(
+                refuse_retry(&params, old).is_ok(),
+                "a dark launch retries at {old}"
+            );
+        }
+        params.appearance = Appearance::Light;
+        for old in [MIN_HOST_VERSION, 12] {
+            let error = refuse_retry(&params, old).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::Unsupported);
+            let message = &error.error.message;
+            assert!(
+                message.contains("appearance")
+                    && message.contains("v0.10.0")
+                    && message.contains(&format!("protocol {old}")),
+                "{message}"
+            );
+        }
+        assert!(refuse_retry(&params, APPEARANCE_VERSION).is_ok());
     }
 
     #[test]
