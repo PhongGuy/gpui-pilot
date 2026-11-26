@@ -214,6 +214,28 @@ fn main() -> ExitCode {
 
 Session mode needs no code: it runs the app's normal debug binary. The tree comes from accessibility, so elements are as findable as the app makes them for a screen reader.
 
+An element's id in session mode is its GPUI `accessibility_id`, which `.id(..)` does not set; without one, the element shows only by role and name. Give it the same string as its headless id, so one `id` target works in both modes:
+
+```rust
+div().id("board-error").test_support().accessibility_id("board-error")
+```
+
+Widgets without `StatefulInteractiveElement`, such as gpui-kit's `Button`, cannot take `accessibility_id` directly. Wrap them in a newtype that forwards `interactivity()` and implements `StatefulInteractiveElement`, set the id, then unwrap with `.0` to go on building the widget:
+
+```rust
+pub struct A11y<E>(pub E);
+
+impl<E: InteractiveElement> InteractiveElement for A11y<E> {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.0.interactivity()
+    }
+}
+
+impl<E: InteractiveElement> StatefulInteractiveElement for A11y<E> {}
+
+A11y(Button::new("open-board")).accessibility_id("open-board").0.label("Open")
+```
+
 ### gpui-pilot.toml
 
 Put this file at the project root. Both sections are optional, but a launch in a mode needs that mode's section.
