@@ -8,6 +8,7 @@ mod bound;
 mod budget;
 mod config;
 mod driver;
+mod driver_thread;
 mod error;
 mod launch;
 mod params;
@@ -23,6 +24,7 @@ use std::process::ExitCode;
 use rmcp::ServiceExt;
 
 use crate::driver::Driver;
+use crate::driver_thread::DriverThread;
 use crate::launch::{Timeouts, temp_root};
 use crate::server::PilotServer;
 
@@ -49,8 +51,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Serves MCP over stdio until the client disconnects; dropping the server then drops the
-/// driver, whose process group takes any running app with it.
+/// Serves MCP over stdio until the client disconnects, then waits for the driver thread to drop
+/// the driver, whose process group takes any running app with it.
 fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::current_dir()?;
     let driver = Driver::new(
@@ -58,15 +60,22 @@ fn serve() -> Result<(), Box<dyn std::error::Error>> {
         temp_root(std::env::var_os("TMPDIR")),
         Timeouts::default(),
     );
+    let (driver, driver_thread) = DriverThread::start(driver)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async {
+    let served: Result<(), Box<dyn std::error::Error>> = runtime.block_on(async {
         PilotServer::new(driver)
             .serve(rmcp::transport::stdio())
             .await?
             .waiting()
             .await?;
         Ok(())
-    })
+    });
+    // Dropping the runtime drops any call still holding a handle, so the thread's queue ends.
+    drop(runtime);
+    driver_thread
+        .join()
+        .map_err(|_| "the driver thread panicked during teardown")?;
+    served
 }

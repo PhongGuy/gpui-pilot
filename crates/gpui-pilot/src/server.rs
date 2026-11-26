@@ -1,6 +1,5 @@
-//! `PilotServer`: the seventeen MCP tools, each run against the one `Driver` on tokio's blocking pool.
+//! `PilotServer`: the seventeen MCP tools, each run against the one `Driver` on its own thread.
 
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use base64::Engine;
@@ -15,6 +14,7 @@ use serde_json::Value;
 use crate::bound::{bound_values, slice_roots};
 use crate::budget::shorten_tree;
 use crate::driver::Driver;
+use crate::driver_thread::DriverThread;
 use crate::error::ToolError;
 use crate::params::{
     ClickArgs, ClipboardArgs, CloseArgs, CloseMode, DialogArgs, DragArgs, DropArgs, FramesArgs,
@@ -46,38 +46,38 @@ impl Done {
     }
 }
 
-/// Serves one client; every tool call takes the driver lock, so calls run one at a time.
+/// Serves one client; every tool call queues on the driver thread, so calls run one at a time.
 #[derive(Clone)]
 pub(crate) struct PilotServer {
-    driver: Arc<Mutex<Driver>>,
+    driver: DriverThread,
     #[expect(dead_code, reason = "read through the macro-generated router")]
     tool_router: ToolRouter<Self>,
 }
 
 impl PilotServer {
-    pub fn new(driver: Driver) -> PilotServer {
+    pub fn new(driver: DriverThread) -> PilotServer {
         PilotServer {
-            driver: Arc::new(Mutex::new(driver)),
+            driver,
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Runs `work` under the driver lock on the blocking pool, so no lock is held across an
-    /// `.await`, and shapes its outcome as a success with a summary line or an `isError` result.
+    /// Runs `work` on the driver thread, so no tokio thread blocks on it and every child it
+    /// forks outlives the call, and shapes its outcome as a success with a summary line or an
+    /// `isError` result.
     async fn run(
         &self,
         tool: &'static str,
         work: impl FnOnce(&mut Driver) -> Result<Done, ToolError> + Send + 'static,
     ) -> Result<CallToolResult, ErrorData> {
-        let driver = Arc::clone(&self.driver);
-        let outcome = tokio::task::spawn_blocking(move || {
-            // A panic in an earlier call leaves the driver usable; its state is still consistent.
-            let mut guard = driver.lock().unwrap_or_else(PoisonError::into_inner);
-            let outcome = work(&mut guard);
-            (outcome, guard.secrets().to_vec())
-        })
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("{tool} failed: {e}"), None))?;
+        let outcome = self
+            .driver
+            .run(move |driver| {
+                let outcome = work(driver);
+                (outcome, driver.secrets().to_vec())
+            })
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("{tool} failed: {e}"), None))?;
         let (outcome, secrets) = outcome;
         Ok(match outcome {
             Ok(done) => success_result(tool, done, &secrets),

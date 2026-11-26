@@ -277,6 +277,38 @@ async fn the_pasta_network_mode_drives_and_tears_down_too() {
     assert_no_leaks(&pilot, inside, &dir).await;
 }
 
+/// Launches under `network`, sits idle past tokio's 10 s blocking-thread keep-alive, and
+/// requires the app to still be alive and answering (#64: the sandbox died with that thread).
+async fn an_idle_session_survives(network: &str) {
+    let pilot = Pilot::start(Some(&config())).await;
+    let launched = pilot.ok("launch", launch(network)).await;
+    let dir = launch_dir(&launched);
+    let host_pid = launched["host_pid"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no host_pid: {launched}"));
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert!(alive(host_pid), "the app died while the launch sat idle");
+    let tree = pilot.ok("tree", json!({})).await;
+    assert!(!tree["nodes"].as_array().unwrap().is_empty(), "{tree}");
+    let inside = descendants(pilot.server_pid);
+    pilot.ok("close", json!({})).await;
+    assert_no_leaks(&pilot, inside, &dir).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_session_outlives_the_blocking_pool_keep_alive() {
+    if session_tests(Network::None) {
+        an_idle_session_survives("none").await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_pasta_session_outlives_the_blocking_pool_keep_alive() {
+    if session_tests(Network::Pasta) {
+        an_idle_session_survives("pasta").await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pick_file_stages_host_files_and_the_clipboard_reaches_the_app() {
     if !session_tests(Network::None) {
