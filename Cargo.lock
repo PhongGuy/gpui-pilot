@@ -2769,8 +2769,10 @@ dependencies = [
 name = "gpui-pilot-session"
 version = "0.9.1"
 dependencies = [
+ "async-io",
  "atspi-common 0.14.0",
  "atspi-proxies 0.14.0",
+ "futures-lite",
  "gpui-pilot-protocol",
  "image",
  "reis",

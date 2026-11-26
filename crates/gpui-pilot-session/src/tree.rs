@@ -1,6 +1,10 @@
 //! The app's AT-SPI tree, read from the session's accessibility bus as protocol `Node`s.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use atspi_common::{CacheItem, CoordType, ObjectRefOwned, State, StateSet};
@@ -115,6 +119,68 @@ fn past_deadline(read: usize) -> SessionError {
     SessionError::Timeout(format!(
         "reading the accessibility tree passed its deadline after {read} nodes"
     ))
+}
+
+/// Nodes read at once by the cache walk: two calls each.
+const WINDOW: usize = 32;
+
+/// Runs `calls` with at most `cap` in flight, answering their outputs in input order and
+/// counting finished calls in `read`; returns the first error at once, dropping every other call.
+async fn window<T, E, F>(calls: Vec<F>, cap: usize, read: &Cell<usize>) -> Result<Vec<T>, E>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    // Keep `cap` calls polled; a finished one's slot goes to the next unstarted call at once.
+    // Returning from the first error drops `flying` and `pending`, cancelling every other call.
+    let total = calls.len();
+    let mut pending = calls.into_iter().enumerate();
+    let mut flying: Vec<(usize, Pin<Box<F>>)> = Vec::with_capacity(cap);
+    let mut done: Vec<Option<T>> = (0..total).map(|_| None).collect();
+    futures_lite::future::poll_fn(|cx| {
+        loop {
+            while flying.len() < cap {
+                let Some((i, call)) = pending.next() else {
+                    break;
+                };
+                flying.push((i, Box::pin(call)));
+            }
+            let mut progressed = false;
+            let mut k = 0;
+            while k < flying.len() {
+                match flying[k].1.as_mut().poll(cx) {
+                    Poll::Ready(Ok(value)) => {
+                        let (i, _) = flying.swap_remove(k);
+                        done[i] = Some(value);
+                        read.set(read.get() + 1);
+                        progressed = true;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Pending => k += 1,
+                }
+            }
+            if read.get() == total {
+                return Poll::Ready(Ok(done.drain(..).flatten().collect()));
+            }
+            if !progressed {
+                return Poll::Pending;
+            }
+        }
+    })
+    .await
+}
+
+/// `work`, unless `deadline` passes first: then `past_deadline(read.get())`. The timer is polled
+/// first, so a deadline already past is a `Timeout` even when `work` is ready.
+async fn by_deadline<T>(
+    work: impl Future<Output = Result<T, SessionError>>,
+    deadline: Instant,
+    read: &Cell<usize>,
+) -> Result<T, SessionError> {
+    let timer = async {
+        async_io::Timer::at(deadline).await;
+        Err(past_deadline(read.get()))
+    };
+    futures_lite::future::or(timer, work).await
 }
 
 /// `Ok(Some(items))` for a reply in `CacheItem`'s signature; `Ok(None)` (fall back) for
@@ -885,5 +951,102 @@ mod tests {
             matches!(denied, Err(SessionError::Internal(_))),
             "{denied:?}"
         );
+    }
+
+    use async_io::Timer;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[test]
+    fn the_window_answers_in_order_with_at_most_its_cap_in_flight() {
+        let (flying, most) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let calls: Vec<_> = (0..100usize)
+            .map(|i| {
+                let (flying, most) = (flying.clone(), most.clone());
+                async move {
+                    flying.set(flying.get() + 1);
+                    most.set(most.get().max(flying.get()));
+                    Timer::after(Duration::from_millis((i * 7 % 5) as u64)).await;
+                    flying.set(flying.get() - 1);
+                    Ok::<usize, &'static str>(i)
+                }
+            })
+            .collect();
+        let read = Cell::new(0);
+        let answered = async_io::block_on(window(calls, 32, &read)).unwrap();
+        assert_eq!(answered, (0..100).collect::<Vec<_>>());
+        assert_eq!((most.get(), read.get()), (32, 100));
+        let none = async_io::block_on(window(
+            Vec::<std::future::Ready<Result<usize, &'static str>>>::new(),
+            32,
+            &Cell::new(0),
+        ));
+        assert_eq!(none, Ok(Vec::new()));
+    }
+
+    #[test]
+    fn the_window_returns_on_the_first_error_and_drops_every_other_call() {
+        struct Dropped(Rc<Cell<usize>>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let dropped = Rc::new(Cell::new(0));
+        let calls: Vec<_> = (0..100usize)
+            .map(|i| {
+                let guard = Dropped(dropped.clone());
+                async move {
+                    let _guard = guard;
+                    if i == 5 {
+                        Timer::after(Duration::from_millis(10)).await;
+                        return Err("gone silent");
+                    }
+                    Timer::after(Duration::from_secs(60)).await;
+                    Ok::<usize, &'static str>(i)
+                }
+            })
+            .collect();
+        let started = Instant::now();
+        let result = async_io::block_on(window(calls, 32, &Cell::new(0)));
+        assert_eq!(result, Err("gone silent"));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "waited {:?}",
+            started.elapsed()
+        );
+        // The 32 in flight and the 68 never started are all gone once the window answers.
+        assert_eq!(dropped.get(), 100);
+    }
+
+    #[test]
+    fn a_cache_walk_past_its_deadline_is_a_timeout_naming_the_nodes_read() {
+        let started = Instant::now();
+        let slow = async_io::block_on(by_deadline(
+            async {
+                Timer::after(Duration::from_secs(60)).await;
+                Ok(())
+            },
+            started + Duration::from_millis(50),
+            &Cell::new(3),
+        ));
+        match slow {
+            Err(SessionError::Timeout(m)) => {
+                assert!(m.contains("passed its deadline after 3 nodes"), "{m}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let late = async_io::block_on(by_deadline(async { Ok(()) }, Instant::now(), &Cell::new(0)));
+        match late {
+            Err(SessionError::Timeout(m)) => assert!(m.contains("after 0 nodes"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        let quick = async_io::block_on(by_deadline(
+            async { Ok(7) },
+            Instant::now() + Duration::from_secs(60),
+            &Cell::new(0),
+        ));
+        assert_eq!(quick.unwrap(), 7);
     }
 }

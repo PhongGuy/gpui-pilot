@@ -13,6 +13,8 @@ xkbcommon = { version = "=0.9.0", default-features = false, features = ["wayland
 zbus = { version = "=5.19.0", default-features = false, features = ["blocking-api", "async-io"] }
 atspi-proxies = "=0.14.0"
 atspi-common = "=0.14.0"
+async-io = "=2.6.0"
+futures-lite = { version = "=2.6.1", default-features = false, features = ["std"] }
 wl-clipboard-rs = "=0.9.4"
 wayland-client = "=0.31.15"
 image.workspace = true
