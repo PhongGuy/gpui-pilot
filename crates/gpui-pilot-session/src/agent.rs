@@ -1203,9 +1203,12 @@ fn stalled(
 ) -> Result<(), SessionError> {
     match error {
         SessionError::Unanswered(_) if one_look => Err(error),
-        SessionError::Unanswered(message) if now >= deadline => Err(SessionError::Timeout(
-            format!("after {timeout_ms} ms: {message} (its main thread is busy)"),
-        )),
+        SessionError::Unanswered(message) if now >= deadline => {
+            Err(SessionError::Timeout(format!(
+                "after {timeout_ms} ms: {message} (the app is busy, or its accessibility \
+                 connection is behind)"
+            )))
+        }
         SessionError::Unanswered(_) => Ok(()),
         error => Err(error),
     }
@@ -1636,6 +1639,10 @@ mod tests {
                 assert!(m.starts_with("after 1000 ms: "), "{m}");
                 assert!(m.contains("did not answer"), "{m}");
                 assert!(!m.contains("optimised") && !m.contains("launch"), "{m}");
+                assert!(
+                    m.ends_with("(the app is busy, or its accessibility connection is behind)"),
+                    "{m}"
+                );
             }
             other => panic!("{other:?}"),
         }

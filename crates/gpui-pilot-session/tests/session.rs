@@ -167,6 +167,211 @@ fn inner_stopped_app() {
 }
 
 #[test]
+fn a_connection_the_registry_never_listed_is_walked_by_pid() {
+    outer("inner_unlisted_connection", "unlisted ok");
+}
+
+/// A builder for a fresh connection to the session's accessibility bus, beside `Session`'s own.
+fn a11y_builder() -> zbus::blocking::connection::Builder<'static> {
+    let bus = zbus::blocking::Connection::session().unwrap();
+    let address: String = bus
+        .call_method(
+            Some("org.a11y.Bus"),
+            "/org/a11y/bus",
+            Some("org.a11y.Bus"),
+            "GetAddress",
+            &(),
+        )
+        .unwrap()
+        .body()
+        .deserialize()
+        .unwrap();
+    zbus::blocking::connection::Builder::address(address.as_str()).unwrap()
+}
+
+/// Answers `GetItems` only after the 2 s call limit, like an app whose accessibility thread is
+/// behind.
+struct SlowCache;
+
+#[zbus::interface(name = "org.a11y.atspi.Cache")]
+impl SlowCache {
+    async fn get_items(&self) {
+        async_io::Timer::after(Duration::from_secs(3)).await;
+    }
+}
+
+#[test]
+#[ignore = "runs inside the sandbox through a_connection_the_registry_never_listed_is_walked_by_pid"]
+fn inner_unlisted_connection() {
+    if !inner() {
+        return;
+    }
+    let mut session = Session::start(OUTPUT).unwrap();
+    // This process owns the session's connection (excluded) plus the fakes, none registered.
+    let pid = std::process::id();
+    let fake = || {
+        a11y_builder()
+            .serve_at("/org/a11y/atspi/cache", SlowCache)
+            .unwrap()
+            .build()
+            .unwrap()
+    };
+    let (first, second) = (fake(), fake());
+    match session.tree(pid) {
+        Err(SessionError::Unanswered(m)) => assert!(m.contains("several"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+
+    // One left: walked at the root path, where the slow cache leaves the walk unanswered.
+    second.close().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let started = Instant::now();
+        match session.tree(pid) {
+            Err(SessionError::Unanswered(m)) if m.contains("several") => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the closed connection never left the bus"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(SessionError::Unanswered(m)) => {
+                assert!(m.contains("did not answer"), "{m}");
+                let took = started.elapsed();
+                assert!(took < Duration::from_secs(4), "the walk took {took:?}");
+                break;
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // None left: no accessible application, as before the scan existed.
+    first.close().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match session.tree(pid) {
+            Err(SessionError::LaunchFailed {
+                stage: "atspi",
+                message,
+            }) => {
+                assert_eq!(message, format!("no accessible application has pid {pid}"));
+                break;
+            }
+            Err(SessionError::Unanswered(_)) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    println!("unlisted ok");
+}
+
+#[test]
+fn an_app_the_registry_hides_is_still_read_by_pid() {
+    outer("inner_registry_drop", "registry drop ok");
+}
+
+/// Whether the registry's root lists an application whose connection belongs to `pid`.
+fn listed(a11y: &zbus::blocking::Connection, pid: u32) -> bool {
+    let root = atspi_proxies::accessible::AccessibleProxyBlocking::builder(a11y)
+        .destination("org.a11y.atspi.Registry")
+        .unwrap()
+        .path("/org/a11y/atspi/accessible/root")
+        .unwrap()
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .unwrap();
+    let dbus = zbus::blocking::fdo::DBusProxy::new(a11y).unwrap();
+    root.get_children()
+        .unwrap()
+        .iter()
+        .filter_map(|app| app.name_as_str())
+        .any(|name| {
+            zbus::names::BusName::try_from(name)
+                .ok()
+                .and_then(|name| dbus.get_connection_unix_process_id(name).ok())
+                == Some(pid)
+        })
+}
+
+#[test]
+#[ignore = "runs inside the sandbox through an_app_the_registry_hides_is_still_read_by_pid"]
+fn inner_registry_drop() {
+    if !inner() {
+        return;
+    }
+    use rustix::process::{Pid, Signal, kill_process};
+    let mut session = Session::start(OUTPUT).unwrap();
+    // The registry started inside `start`; its first ping leaves about 30 s from here.
+    let started = Instant::now();
+    let demo = Demo::spawn();
+    session
+        .wait_window(demo.pid(), Duration::from_secs(15))
+        .unwrap();
+    session
+        .place(demo.pid(), Rect::new(0., 0., 1280., 800.))
+        .unwrap();
+    settled_tree(&mut session, demo.pid(), |nodes| {
+        nodes.iter().any(|n| n.id.as_deref() == Some("count"))
+    });
+    let a11y = a11y_builder().build().unwrap();
+    let listed_by = Instant::now() + Duration::from_secs(5);
+    while !listed(&a11y, demo.pid()) {
+        assert!(
+            Instant::now() < listed_by,
+            "the registry never listed the demo"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Stopped from 25 s until the registry hides it: across the first ping window, or the
+    // second should start-up have run long.
+    let stop_at = started + Duration::from_secs(25);
+    let now = Instant::now();
+    assert!(
+        now < stop_at,
+        "setup took {:?}, past the stop at 25 s",
+        now - started
+    );
+    std::thread::sleep(stop_at - now);
+    let pid = Pid::from_child(&demo.child);
+    let resume = Resume(pid);
+    kill_process(pid, Signal::STOP).unwrap();
+    let give_up = started + Duration::from_secs(75);
+    while listed(&a11y, demo.pid()) {
+        assert!(
+            Instant::now() < give_up,
+            "the registry still listed the stopped demo 75 s after it started"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let hidden = started.elapsed();
+    drop(resume);
+
+    // Hidden until its next answered ping, about 30 s on: the tree is read by pid meanwhile.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let nodes = loop {
+        match session.tree(demo.pid()) {
+            Ok(nodes) if nodes.iter().any(|n| n.id.as_deref() == Some("count")) => break nodes,
+            Ok(_) | Err(SessionError::Unanswered(_)) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            other => panic!("the hidden demo was not read: {other:?}"),
+        }
+    };
+    assert!(nodes.len() > 1);
+    assert!(
+        !listed(&a11y, demo.pid()),
+        "the registry listed the demo again before the read ({:?} after start); the read proves nothing",
+        started.elapsed()
+    );
+    println!(
+        "registry drop ok: hidden at {hidden:?}, read at {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn the_cache_walk_reads_the_same_tree_as_the_per_node_walk() {
     if !session_tests() {
         return;

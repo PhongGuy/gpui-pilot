@@ -22,6 +22,8 @@ const UNKNOWN_OBJECT: &str = "org.freedesktop.DBus.Error.UnknownObject";
 const NO_REPLY: &str = "org.freedesktop.DBus.Error.NoReply";
 const UNKNOWN_METHOD: &str = "org.freedesktop.DBus.Error.UnknownMethod";
 const UNKNOWN_INTERFACE: &str = "org.freedesktop.DBus.Error.UnknownInterface";
+const SERVICE_UNKNOWN: &str = "org.freedesktop.DBus.Error.ServiceUnknown";
+const NAME_HAS_NO_OWNER: &str = "org.freedesktop.DBus.Error.NameHasNoOwner";
 const CACHE_PATH: &str = "/org/a11y/atspi/cache";
 const CACHE_INTERFACE: &str = "org.a11y.atspi.Cache";
 
@@ -207,8 +209,9 @@ fn skip_vanished<T>(found: Vec<(Vec<u64>, Option<T>)>) -> Vec<(Vec<u64>, T)> {
 /// Depth-first from the application object at `root`, reading each node below it with its
 /// child-index path; `children` lists a node's child object paths. A node below the root that
 /// vanishes mid-walk (`UnknownObject`, as a re-rendering app drops it) is skipped with its
-/// subtree; any other error, or the root vanishing, fails the walk. A call the app does not
-/// answer fails it as `Unanswered`, a walk still going at `deadline` as `Timeout`.
+/// subtree; the root vanishing or its app leaving the bus is `LaunchFailed` (gone); any other
+/// error fails the walk. A call the app does not answer fails it as `Unanswered`, a walk still
+/// going at `deadline` as `Timeout`.
 fn collect(
     root: String,
     deadline: Instant,
@@ -229,6 +232,12 @@ fn collect(
             Ok(listed) => listed,
             Err(error) if not_answering(&error) => return Err(unanswered()),
             Err(error) if below_root && vanished(&error) => continue,
+            Err(error) if !below_root && (vanished(&error) || left(&error)) => {
+                return Err(SessionError::LaunchFailed {
+                    stage: "atspi",
+                    message: "the application object left the accessibility bus".into(),
+                });
+            }
             Err(error) => return Err(error.into()),
         };
         found.extend(node);
@@ -319,8 +328,9 @@ async fn by_deadline<T>(
 }
 
 /// `Ok(Some(items))` for a reply in `CacheItem`'s signature; `Ok(None)` (fall back) for
-/// UnknownMethod, UnknownInterface or UnknownObject, or a reply in any other signature, such
-/// as Qt's legacy cache; `Err(Unanswered)` for a timeout or NoReply; any other error as is.
+/// UnknownMethod, UnknownInterface or UnknownObject, the app having left the bus (the walk then
+/// names it gone), or a reply in any other signature, such as Qt's legacy cache;
+/// `Err(Unanswered)` for a timeout or NoReply; any other error as is.
 fn cache_reply(reply: zbus::Result<zbus::Message>) -> Result<Option<Vec<CacheItem>>, SessionError> {
     match reply {
         Ok(message) => {
@@ -331,7 +341,7 @@ fn cache_reply(reply: zbus::Result<zbus::Message>) -> Result<Option<Vec<CacheIte
             Ok(Some(body.deserialize()?))
         }
         Err(error) if not_answering(&error) => Err(unanswered()),
-        Err(error) if missing(&error) || vanished(&error) => Ok(None),
+        Err(error) if missing(&error) || vanished(&error) || left(&error) => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
@@ -436,6 +446,20 @@ fn missing(error: &zbus::Error) -> bool {
     }
 }
 
+/// True when `error` says the peer itself left the bus: ServiceUnknown or NameHasNoOwner.
+fn left(error: &zbus::Error) -> bool {
+    match error {
+        zbus::Error::MethodError(name, ..) => {
+            matches!(name.as_str(), SERVICE_UNKNOWN | NAME_HAS_NO_OWNER)
+        }
+        zbus::Error::FDO(error) => matches!(
+            **error,
+            zbus::fdo::Error::ServiceUnknown(_) | zbus::fdo::Error::NameHasNoOwner(_)
+        ),
+        _ => false,
+    }
+}
+
 /// True when `error` says the object is no longer on the bus.
 fn vanished(error: &zbus::Error) -> bool {
     match error {
@@ -445,31 +469,82 @@ fn vanished(error: &zbus::Error) -> bool {
     }
 }
 
+/// The bus calls `application` makes, so the pick is testable without a bus.
+trait A11yBus {
+    /// The registry root's children as (bus name, object path), skipping children without a
+    /// name.
+    fn listed(&self) -> zbus::Result<Vec<(String, String)>>;
+    /// Every name on the bus (`ListNames`).
+    fn names(&self) -> zbus::Result<Vec<String>>;
+    /// The process that owns `name` (`GetConnectionUnixProcessID`).
+    fn pid_of(&self, name: &str) -> zbus::Result<u32>;
+    /// This connection's own unique name.
+    fn own(&self) -> Option<String>;
+}
+
+impl A11yBus for Connection {
+    fn listed(&self) -> zbus::Result<Vec<(String, String)>> {
+        let root = accessible(self, REGISTRY, ROOT)?;
+        Ok(root
+            .get_children()?
+            .iter()
+            .filter_map(|app| Some((app.name_as_str()?.to_owned(), app.path_as_str().to_owned())))
+            .collect())
+    }
+
+    fn names(&self) -> zbus::Result<Vec<String>> {
+        let names = dbus(self)?.list_names()?;
+        Ok(names.into_iter().map(|name| name.to_string()).collect())
+    }
+
+    fn pid_of(&self, name: &str) -> zbus::Result<u32> {
+        let name = zbus::names::BusName::try_from(name)?;
+        Ok(dbus(self)?.get_connection_unix_process_id(name)?)
+    }
+
+    fn own(&self) -> Option<String> {
+        self.unique_name().map(|name| name.to_string())
+    }
+}
+
+/// The bus daemon's own interface on `a11y`, without a property cache.
+fn dbus(a11y: &Connection) -> zbus::Result<zbus::blocking::fdo::DBusProxy<'static>> {
+    zbus::blocking::fdo::DBusProxy::builder(a11y)
+        .cache_properties(CacheProperties::No)
+        .build()
+}
+
 /// The application object (bus name and path) whose connection belongs to process `pid`.
-fn application(a11y: &Connection, pid: u32) -> Result<(String, String), SessionError> {
-    let root = accessible(a11y, REGISTRY, ROOT)?;
-    for app in root.get_children()? {
-        let Some(name) = app.name_as_str() else {
-            continue;
-        };
+/// The registry's listing comes first; on a miss (the registry drops an app that misses its
+/// ping) the bus's unique names are scanned by pid and the one match is walked at `ROOT`.
+fn application(a11y: &impl A11yBus, pid: u32) -> Result<(String, String), SessionError> {
+    for (name, path) in a11y.listed()? {
         // An app that left the bus since the registry listed it simply does not match.
-        let owner = a11y
-            .call_method(
-                Some("org.freedesktop.DBus"),
-                "/org/freedesktop/DBus",
-                Some("org.freedesktop.DBus"),
-                "GetConnectionUnixProcessID",
-                &(name,),
-            )
-            .and_then(|reply| reply.body().deserialize::<u32>());
-        if owner.ok() == Some(pid) {
-            return Ok((name.to_owned(), app.path_as_str().to_owned()));
+        if a11y.pid_of(&name).ok() == Some(pid) {
+            return Ok((name, path));
         }
     }
-    Err(SessionError::LaunchFailed {
-        stage: "atspi",
-        message: format!("no accessible application has pid {pid}"),
-    })
+    let names = a11y.names().map_err(|e| {
+        SessionError::Internal(format!(
+            "the accessibility bus did not list its connections: {e}"
+        ))
+    })?;
+    let own = a11y.own();
+    let mut owned = names.into_iter().filter(|name| {
+        name.starts_with(':') && Some(name) != own.as_ref() && a11y.pid_of(name).ok() == Some(pid)
+    });
+    match (owned.next(), owned.next()) {
+        (Some(name), None) => Ok((name, ROOT.to_owned())),
+        (None, _) => Err(SessionError::LaunchFailed {
+            stage: "atspi",
+            message: format!("no accessible application has pid {pid}"),
+        }),
+        // Guessing between a toolkit's two connections could walk the wrong tree.
+        (Some(_), Some(_)) => Err(SessionError::Unanswered(format!(
+            "the AT-SPI registry stopped listing the app and several accessibility connections \
+             share its pid {pid}"
+        ))),
+    }
 }
 
 fn accessible<'a>(
@@ -695,9 +770,161 @@ mod tests {
     #[test]
     fn a_vanished_application_or_another_error_still_fails_the_walk() {
         let unknown = |p: &str| reply("org.freedesktop.DBus.Error.UnknownObject", p);
-        assert!(fake_walk(TREE, &["app"], unknown).is_err());
+        let left = |p: &str| reply("org.freedesktop.DBus.Error.ServiceUnknown", p);
+        let no_owner = |p: &str| reply("org.freedesktop.DBus.Error.NameHasNoOwner", p);
+        let fdo = |p: &str| zbus::Error::FDO(Box::new(zbus::fdo::Error::ServiceUnknown(p.into())));
+        let gone: [fn(&str) -> zbus::Error; 4] = [unknown, left, no_owner, fdo];
+        for fail in gone {
+            match fake_walk(TREE, &["app"], fail) {
+                Err(SessionError::LaunchFailed {
+                    stage: "atspi",
+                    message,
+                }) => assert!(message.contains("left the accessibility bus"), "{message}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        // Below the root, a whole app leaving is not one vanished node: the walk still fails.
+        assert!(matches!(
+            fake_walk(TREE, &["a"], left),
+            Err(SessionError::Internal(_))
+        ));
         let denied = |p: &str| reply("org.freedesktop.DBus.Error.AccessDenied", p);
-        assert!(fake_walk(TREE, &["a"], denied).is_err());
+        assert!(matches!(
+            fake_walk(TREE, &["a"], denied),
+            Err(SessionError::Internal(_))
+        ));
+    }
+
+    /// A fake accessibility bus: the registry's listing, every name with its owner's pid
+    /// (`None` for a name gone before the pid query), and this connection's own name.
+    struct FakeBus {
+        listed: Vec<(&'static str, &'static str)>,
+        names: Vec<(&'static str, Option<u32>)>,
+        names_fail: bool,
+        scanned: Cell<bool>,
+    }
+
+    impl A11yBus for FakeBus {
+        fn listed(&self) -> zbus::Result<Vec<(String, String)>> {
+            Ok(self
+                .listed
+                .iter()
+                .map(|(n, p)| (n.to_string(), p.to_string()))
+                .collect())
+        }
+        fn names(&self) -> zbus::Result<Vec<String>> {
+            self.scanned.set(true);
+            if self.names_fail {
+                return Err(timed_out("ListNames"));
+            }
+            Ok(self.names.iter().map(|(n, _)| n.to_string()).collect())
+        }
+        fn pid_of(&self, name: &str) -> zbus::Result<u32> {
+            match self.names.iter().find(|(n, _)| *n == name) {
+                Some((_, Some(pid))) => Ok(*pid),
+                _ => Err(reply("org.freedesktop.DBus.Error.NameHasNoOwner", name)),
+            }
+        }
+        fn own(&self) -> Option<String> {
+            Some(":1.0".to_owned())
+        }
+    }
+
+    fn bus(
+        listed: &[(&'static str, &'static str)],
+        names: &[(&'static str, Option<u32>)],
+    ) -> FakeBus {
+        FakeBus {
+            listed: listed.to_vec(),
+            names: names.to_vec(),
+            names_fail: false,
+            scanned: Cell::new(false),
+        }
+    }
+
+    const APP_PATH: &str = "/org/a11y/atspi/accessible/app";
+
+    #[test]
+    fn a_listed_app_is_found_at_its_registry_path_without_a_scan() {
+        let mut fake = bus(
+            &[(":1.4", "/other"), (":1.5", APP_PATH)],
+            &[(":1.4", Some(9)), (":1.5", Some(42))],
+        );
+        fake.names_fail = true;
+        assert_eq!(
+            application(&fake, 42).unwrap(),
+            (":1.5".to_owned(), APP_PATH.to_owned())
+        );
+        assert!(!fake.scanned.get(), "a listed app needs no scan");
+    }
+
+    #[test]
+    fn an_unlisted_app_is_found_by_its_pid_at_the_root_path() {
+        // The own connection and a well-known name share the pid; neither is the app, and a
+        // name gone before its pid query is skipped.
+        let fake = bus(
+            &[(":1.4", APP_PATH)],
+            &[
+                (":1.0", Some(42)),
+                ("org.a11y.atspi.Registry", Some(42)),
+                (":1.4", Some(9)),
+                (":1.7", None),
+                (":1.9", Some(42)),
+            ],
+        );
+        assert_eq!(
+            application(&fake, 42).unwrap(),
+            (":1.9".to_owned(), ROOT.to_owned())
+        );
+        assert!(fake.scanned.get());
+    }
+
+    #[test]
+    fn no_other_connection_with_the_pid_is_no_application() {
+        let fake = bus(
+            &[(":1.4", APP_PATH)],
+            &[(":1.0", Some(42)), (":1.4", Some(9)), (":1.7", None)],
+        );
+        match application(&fake, 42) {
+            Err(SessionError::LaunchFailed {
+                stage: "atspi",
+                message,
+            }) => assert_eq!(message, "no accessible application has pid 42"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn several_unlisted_connections_with_the_pid_are_unanswered() {
+        let fake = bus(&[], &[(":1.8", Some(42)), (":1.9", Some(42))]);
+        match application(&fake, 42) {
+            Err(SessionError::Unanswered(m)) => {
+                assert!(m.contains("several") && m.contains("pid 42"), "{m}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bus_that_cannot_list_its_names_is_not_an_unanswered_app() {
+        let mut fake = bus(&[], &[]);
+        fake.names_fail = true;
+        match application(&fake, 42) {
+            Err(SessionError::Internal(m)) => assert!(m.contains("accessibility bus"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_application_that_left_the_bus_falls_back_to_the_walk() {
+        let errors = [
+            reply("org.freedesktop.DBus.Error.ServiceUnknown", CACHE_PATH),
+            reply("org.freedesktop.DBus.Error.NameHasNoOwner", CACHE_PATH),
+            zbus::Error::FDO(Box::new(zbus::fdo::Error::ServiceUnknown("s".into()))),
+        ];
+        for error in errors {
+            assert!(cache_reply(Err(error)).unwrap().is_none());
+        }
     }
 
     /// `TREE`'s children of `path`, for walks that need no failures.
