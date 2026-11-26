@@ -1,8 +1,9 @@
 //! The app's AT-SPI tree, read from the session's accessibility bus as protocol `Node`s.
 
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use atspi_common::{CoordType, State, StateSet};
+use atspi_common::{CacheItem, CoordType, ObjectRefOwned, State, StateSet};
 use atspi_proxies::accessible::AccessibleProxyBlocking;
 use atspi_proxies::component::ComponentProxyBlocking;
 use gpui_pilot_protocol::{Node, Rect, Segment};
@@ -17,6 +18,8 @@ const UNKNOWN_OBJECT: &str = "org.freedesktop.DBus.Error.UnknownObject";
 const NO_REPLY: &str = "org.freedesktop.DBus.Error.NoReply";
 const UNKNOWN_METHOD: &str = "org.freedesktop.DBus.Error.UnknownMethod";
 const UNKNOWN_INTERFACE: &str = "org.freedesktop.DBus.Error.UnknownInterface";
+const CACHE_PATH: &str = "/org/a11y/atspi/cache";
+const CACHE_INTERFACE: &str = "org.a11y.atspi.Cache";
 
 /// How long one call to the app may take before it counts as not answering.
 pub(crate) const CALL_LIMIT: Duration = Duration::from_secs(2);
@@ -77,10 +80,7 @@ fn collect(
     let mut stack = vec![(root, Vec::<u64>::new())];
     while let Some((path, indices)) = stack.pop() {
         if Instant::now() >= deadline {
-            return Err(SessionError::Timeout(format!(
-                "reading the accessibility tree passed its deadline after {} nodes",
-                found.len()
-            )));
+            return Err(past_deadline(found.len()));
         }
         let below_root = !indices.is_empty();
         // The application object itself is not a node; only what lies below it is read.
@@ -88,12 +88,7 @@ fn collect(
         let listed = node.and_then(|node| Ok((node, children(&path)?)));
         let (node, kids) = match listed {
             Ok(listed) => listed,
-            Err(error) if not_answering(&error) => {
-                return Err(SessionError::Unanswered(format!(
-                    "the app did not answer an accessibility request within {} s",
-                    CALL_LIMIT.as_secs()
-                )));
-            }
+            Err(error) if not_answering(&error) => return Err(unanswered()),
             Err(error) if below_root && vanished(&error) => continue,
             Err(error) => return Err(error.into()),
         };
@@ -105,6 +100,104 @@ fn collect(
         }
     }
     Ok(found)
+}
+
+/// The error for a call the app did not answer within `CALL_LIMIT`.
+fn unanswered() -> SessionError {
+    SessionError::Unanswered(format!(
+        "the app did not answer an accessibility request within {} s",
+        CALL_LIMIT.as_secs()
+    ))
+}
+
+/// The error for a walk still going at its deadline after reading `read` nodes.
+fn past_deadline(read: usize) -> SessionError {
+    SessionError::Timeout(format!(
+        "reading the accessibility tree passed its deadline after {read} nodes"
+    ))
+}
+
+/// `Ok(Some(items))` for a reply in `CacheItem`'s signature; `Ok(None)` (fall back) for
+/// UnknownMethod, UnknownInterface or UnknownObject, or a reply in any other signature, such
+/// as Qt's legacy cache; `Err(Unanswered)` for a timeout or NoReply; any other error as is.
+fn cache_reply(reply: zbus::Result<zbus::Message>) -> Result<Option<Vec<CacheItem>>, SessionError> {
+    match reply {
+        Ok(message) => {
+            let body = message.body();
+            if *body.signature() != *<Vec<CacheItem> as zbus::zvariant::Type>::SIGNATURE {
+                return Ok(None);
+            }
+            Ok(Some(body.deserialize()?))
+        }
+        Err(error) if not_answering(&error) => Err(unanswered()),
+        Err(error) if missing(&error) || vanished(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Every item but the application's own, with its child-index path below `app` (bus name,
+/// path), sorted by path. `None` when the snapshot is not one whole tree: the application's
+/// item missing, an object listed twice, a parent not listed, a parent's child indices not
+/// exactly `0..children`, or a parent chain that never reaches the application.
+fn snapshot(app: (&str, &str), items: Vec<CacheItem>) -> Option<Vec<(Vec<u64>, CacheItem)>> {
+    // Objects are keyed by bus name and path together: the same path on another bus is another
+    // object (the registry's desktop root shares the application's path).
+    fn key(o: &ObjectRefOwned) -> (Option<&str>, &str) {
+        (o.name_as_str(), o.path_as_str())
+    }
+    let mut at = HashMap::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        if at.insert(key(&item.object), i).is_some() {
+            return None;
+        }
+    }
+    let root = *at.get(&(Some(app.0), app.1))?;
+
+    // Each listed child claims one free index below its parent's count; the counts must then
+    // match exactly, the application's included, so nothing is missing either.
+    let mut parent = vec![root; items.len()];
+    let mut listed = vec![0i64; items.len()];
+    let mut taken = HashSet::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate().filter(|(i, _)| *i != root) {
+        let p = *at.get(&key(&item.parent))?;
+        if !(0..items[p].children).contains(&item.index) || !taken.insert((p, item.index)) {
+            return None;
+        }
+        parent[i] = p;
+        listed[p] += 1;
+    }
+    if items
+        .iter()
+        .zip(&listed)
+        .any(|(item, &n)| i64::from(item.children) != n)
+    {
+        return None;
+    }
+
+    // Climb each item's chain to the application; more steps than items means a cycle.
+    let mut paths = Vec::with_capacity(items.len());
+    for i in 0..items.len() {
+        let mut path = Vec::new();
+        let mut step = i;
+        while step != root {
+            if path.len() == items.len() {
+                return None;
+            }
+            path.push(items[step].index as u64);
+            step = parent[step];
+        }
+        path.reverse();
+        paths.push(path);
+    }
+    let mut found: Vec<_> = paths
+        .into_iter()
+        .zip(items)
+        .enumerate()
+        .filter(|(i, _)| *i != root)
+        .map(|(_, pair)| pair)
+        .collect();
+    found.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Some(found)
 }
 
 /// True for a call the peer did not answer in time: io `TimedOut`, or a `NoReply` error.
@@ -121,20 +214,22 @@ fn not_answering(error: &zbus::Error) -> bool {
 fn without_interface<T>(result: zbus::Result<T>) -> zbus::Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(zbus::Error::MethodError(name, ..))
-            if matches!(name.as_str(), UNKNOWN_METHOD | UNKNOWN_INTERFACE) =>
-        {
-            Ok(None)
-        }
-        Err(zbus::Error::FDO(error))
-            if matches!(
-                *error,
-                zbus::fdo::Error::UnknownMethod(_) | zbus::fdo::Error::UnknownInterface(_)
-            ) =>
-        {
-            Ok(None)
-        }
+        Err(error) if missing(&error) => Ok(None),
         Err(error) => Err(error),
+    }
+}
+
+/// True when `error` says the object lacks the method or interface called.
+fn missing(error: &zbus::Error) -> bool {
+    match error {
+        zbus::Error::MethodError(name, ..) => {
+            matches!(name.as_str(), UNKNOWN_METHOD | UNKNOWN_INTERFACE)
+        }
+        zbus::Error::FDO(error) => matches!(
+            **error,
+            zbus::fdo::Error::UnknownMethod(_) | zbus::fdo::Error::UnknownInterface(_)
+        ),
+        _ => false,
     }
 }
 
@@ -588,6 +683,207 @@ mod tests {
         assert_eq!(
             unstable(&board(0.), &roled),
             Some("the elements kept changing")
+        );
+    }
+
+    use atspi_common::{CacheItem, LegacyCacheItem, ObjectRefOwned, Role};
+
+    const BUS: &str = ":1.5";
+    const APP: (&str, &str) = (BUS, "/org/a11y/atspi/accessible/root");
+
+    fn obj(path: &'static str) -> ObjectRefOwned {
+        ObjectRefOwned::from_static_str_unchecked(BUS, path)
+    }
+
+    fn item(
+        object: ObjectRefOwned,
+        parent: ObjectRefOwned,
+        index: i32,
+        children: i32,
+    ) -> CacheItem {
+        CacheItem {
+            object,
+            parent,
+            index,
+            children,
+            ..CacheItem::default()
+        }
+    }
+
+    /// The app as accesskit lists it: first, index -1, the registry's desktop root (same path,
+    /// another bus) as parent; then a frame holding b and c (c holding c1), and d beside the frame.
+    fn app_items() -> Vec<CacheItem> {
+        let desktop =
+            ObjectRefOwned::from_static_str_unchecked(":1.0", "/org/a11y/atspi/accessible/root");
+        let app = obj("/org/a11y/atspi/accessible/root");
+        vec![
+            item(app.clone(), desktop, -1, 2),
+            item(obj("/c1"), obj("/c"), 0, 0),
+            item(obj("/d"), app.clone(), 1, 0),
+            item(obj("/b"), obj("/f"), 0, 0),
+            item(obj("/f"), app, 0, 2),
+            item(obj("/c"), obj("/f"), 1, 1),
+        ]
+    }
+
+    fn paths(found: &[(Vec<u64>, CacheItem)]) -> Vec<(Vec<u64>, &str)> {
+        found
+            .iter()
+            .map(|(p, i)| (p.clone(), i.object.path_as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn the_cache_rebuilds_each_child_index_path_below_the_application() {
+        let found = snapshot(APP, app_items()).expect("a whole snapshot");
+        assert_eq!(
+            paths(&found),
+            vec![
+                (vec![0], "/f"),
+                (vec![0, 0], "/b"),
+                (vec![0, 1], "/c"),
+                (vec![0, 1, 0], "/c1"),
+                (vec![1], "/d"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_that_breaks_an_invariant_selects_the_fallback() {
+        let broken = |change: fn(&mut Vec<CacheItem>)| {
+            let mut items = app_items();
+            change(&mut items);
+            snapshot(APP, items)
+        };
+        assert!(broken(|i| i[1].index = -2).is_none(), "a negative index");
+        assert!(broken(|i| i[1].index = 1).is_none(), "a gap under c");
+        assert!(
+            broken(|i| i[4].children = 3).is_none(),
+            "the frame counts a child not listed"
+        );
+        assert!(
+            broken(|i| i[5].index = 0).is_none(),
+            "two children at one index"
+        );
+        assert!(
+            broken(|i| i[1].parent = obj("/nowhere")).is_none(),
+            "a chain to an unknown object"
+        );
+        assert!(
+            broken(|i| i[3].parent = ObjectRefOwned::from_static_str_unchecked(":1.9", "/f"))
+                .is_none(),
+            "the right path on another bus is another object"
+        );
+        assert!(
+            broken(|i| {
+                i.push(item(obj("/x"), obj("/y"), 0, 1));
+                i.push(item(obj("/y"), obj("/x"), 0, 1));
+            })
+            .is_none(),
+            "a cycle never reaches the application"
+        );
+        assert!(
+            broken(|i| {
+                i.remove(0);
+            })
+            .is_none(),
+            "the application's own item is missing"
+        );
+        assert!(
+            broken(|i| i.truncate(1)).is_none(),
+            "only the application: Qt's empty answer"
+        );
+        assert!(snapshot(APP, Vec::new()).is_none(), "no items at all");
+    }
+
+    #[test]
+    fn a_snapshot_keeps_role_name_and_states_from_each_item() {
+        let mut items = app_items();
+        items[3].role = Role::CheckBox;
+        items[3].short_name = "Agree".into();
+        items[3].name = "a description, not the name".into();
+        items[3].states = [State::Showing, State::Checkable].into_iter().collect();
+        let found = snapshot(APP, items).unwrap();
+        let (_, b) = found.iter().find(|(p, _)| p == &vec![0, 0]).unwrap();
+        assert_eq!((b.role, b.short_name.as_str()), (Role::CheckBox, "Agree"));
+        assert!(b.states.contains(State::Checkable));
+    }
+
+    fn returned<B: zbus::export::serde::Serialize + zbus::zvariant::DynamicType>(
+        body: &B,
+    ) -> zbus::Result<zbus::Message> {
+        let call = zbus::Message::method_call(CACHE_PATH, "GetItems")
+            .unwrap()
+            .build(&())
+            .unwrap();
+        Ok(zbus::Message::method_return(&call.header())
+            .unwrap()
+            .build(body)
+            .unwrap())
+    }
+
+    #[test]
+    fn only_a_reply_in_cache_items_signature_is_decoded() {
+        let items = cache_reply(returned(&app_items()))
+            .unwrap()
+            .expect("decoded");
+        assert_eq!(items, app_items());
+        assert!(
+            cache_reply(returned(&Vec::<LegacyCacheItem>::new()))
+                .unwrap()
+                .is_none(),
+            "Qt's legacy cache"
+        );
+        assert!(
+            cache_reply(returned(&())).unwrap().is_none(),
+            "an empty body"
+        );
+    }
+
+    #[test]
+    fn a_missing_cache_falls_back_and_a_silent_app_is_unanswered() {
+        for name in [UNKNOWN_METHOD, UNKNOWN_INTERFACE, UNKNOWN_OBJECT] {
+            assert!(
+                cache_reply(Err(reply(name, CACHE_PATH))).unwrap().is_none(),
+                "{name}"
+            );
+        }
+        let fdo = |e: zbus::fdo::Error| Err(zbus::Error::FDO(Box::new(e)));
+        assert!(
+            cache_reply(fdo(zbus::fdo::Error::UnknownMethod("m".into())))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache_reply(fdo(zbus::fdo::Error::UnknownInterface("i".into())))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache_reply(fdo(zbus::fdo::Error::UnknownObject("o".into())))
+                .unwrap()
+                .is_none()
+        );
+        let silent = [
+            Err(timed_out("a")),
+            Err(reply(NO_REPLY, CACHE_PATH)),
+            fdo(zbus::fdo::Error::NoReply("n".into())),
+        ];
+        for error in silent {
+            match cache_reply(error) {
+                Err(SessionError::Unanswered(m)) => {
+                    assert!(m.contains("did not answer") && m.contains("2 s"), "{m}")
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        let denied = cache_reply(Err(reply(
+            "org.freedesktop.DBus.Error.AccessDenied",
+            CACHE_PATH,
+        )));
+        assert!(
+            matches!(denied, Err(SessionError::Internal(_))),
+            "{denied:?}"
         );
     }
 }
