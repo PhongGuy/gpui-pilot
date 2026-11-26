@@ -110,6 +110,8 @@ struct State {
     /// The last pointer position, as of the latest resize; GPUI reads it when it asks after a
     /// resize.
     pointer: Point<Pixels>,
+    /// The system appearance the platform launched with.
+    appearance: WindowAppearance,
     dialog: Option<(Dialog, oneshot::Sender<usize>)>,
     /// GPUI's accessibility callbacks, called only around an `act` poll's forced frame.
     a11y: Option<gpui_kit::A11yCallbacks>,
@@ -169,12 +171,17 @@ impl PilotWindow {
             close: None,
             resized: None,
             pointer: Point::default(),
+            appearance: WindowAppearance::Dark,
             dialog: None,
             a11y: None,
             a11y_tree: None,
             a11y_active: false,
             a11y_pinned: false,
         })))
+    }
+
+    pub(crate) fn set_appearance(&self, appearance: WindowAppearance) {
+        self.0.borrow_mut().appearance = appearance;
     }
 
     pub(crate) fn downgrade(&self) -> WeakWindow {
@@ -563,7 +570,7 @@ impl PlatformWindow for PilotWindow {
     }
 
     fn appearance(&self) -> WindowAppearance {
-        WindowAppearance::Dark
+        self.0.borrow().appearance
     }
 
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>> {
