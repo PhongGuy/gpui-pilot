@@ -71,7 +71,7 @@ Host files are made visible inside the sandbox with `binds` in the config. Launc
 
 The server and host agree on a protocol version in their first message. This release speaks protocol 12. The server still launches hosts back to protocol 7: it retries at the version the host names and answers `Unsupported` for the features an older host lacks (`a11y` on `frames` needs 12, `resize` needs 11, `drop` 10, a right or middle `drag` 9, `modifiers` on `click` and `drag` 8). To use a newer feature, move the app's `gpui-pilot-host` to the matching tag and rebuild the pilot binary.
 
-Releases are git tags with a semver version, for example `v0.9.2`. Each release's host is built against one gpui-kit version: v0.1.0 against gpui-kit 0.7.1, v0.2.0 and v0.3.0 against 0.9.0, v0.3.1 to v0.5.0 against 0.9.1, v0.6.0 against 0.10.0, and v0.7.0 to v0.9.2 against 0.11.0. A move to a new gpui-kit is a minor version, since the app has to move with it. v0.1.0 to v0.8.1 speak protocol 11 and v0.9.0 to v0.9.2 speak 12. The server launches hosts back to protocol 7, so the newest installed server drives apps pinned to any of these tags; an older server cannot drive a newer host.
+Releases are git tags with a semver version, for example `v0.9.3`. Each release's host is built against one gpui-kit version: v0.1.0 against gpui-kit 0.7.1, v0.2.0 and v0.3.0 against 0.9.0, v0.3.1 to v0.5.0 against 0.9.1, v0.6.0 against 0.10.0, and v0.7.0 to v0.9.3 against 0.11.0. A move to a new gpui-kit is a minor version, since the app has to move with it. v0.1.0 to v0.8.1 speak protocol 11 and v0.9.0 to v0.9.3 speak 12. The server launches hosts back to protocol 7, so the newest installed server drives apps pinned to any of these tags; an older server cannot drive a newer host.
 
 ## Requirements
 
@@ -91,7 +91,7 @@ Releases are git tags with a semver version, for example `v0.9.2`. Each release'
 ## Install the server
 
 ```sh
-cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.9.2 gpui-pilot
+cargo install --locked --git https://github.com/PhongGuy/gpui-pilot --tag v0.9.3 gpui-pilot
 ```
 
 This installs `gpui-pilot` into `~/.cargo/bin`. `gpui-pilot mcp` (or `gpui-pilot` with no argument) serves MCP over stdio, and `gpui-pilot --version` prints the installed version.
@@ -156,7 +156,7 @@ publish = false
 [dependencies]
 my-app = { path = "../../crates/my-app" }
 gpui-kit = "=0.11.0"
-gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.9.2" }
+gpui-pilot-host = { git = "https://github.com/PhongGuy/gpui-pilot", tag = "v0.9.3" }
 anyhow = "1"
 
 # Optional: optimised dependencies make the app much faster under the pilot.
