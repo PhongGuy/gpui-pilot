@@ -167,6 +167,106 @@ fn inner_stopped_app() {
 }
 
 #[test]
+fn a_connection_the_registry_never_listed_is_walked_by_pid() {
+    outer("inner_unlisted_connection", "unlisted ok");
+}
+
+/// A builder for a fresh connection to the session's accessibility bus, beside `Session`'s own.
+fn a11y_builder() -> zbus::blocking::connection::Builder<'static> {
+    let bus = zbus::blocking::Connection::session().unwrap();
+    let address: String = bus
+        .call_method(
+            Some("org.a11y.Bus"),
+            "/org/a11y/bus",
+            Some("org.a11y.Bus"),
+            "GetAddress",
+            &(),
+        )
+        .unwrap()
+        .body()
+        .deserialize()
+        .unwrap();
+    zbus::blocking::connection::Builder::address(address.as_str()).unwrap()
+}
+
+/// Answers `GetItems` only after the 2 s call limit, like an app whose accessibility thread is
+/// behind.
+struct SlowCache;
+
+#[zbus::interface(name = "org.a11y.atspi.Cache")]
+impl SlowCache {
+    async fn get_items(&self) {
+        async_io::Timer::after(Duration::from_secs(3)).await;
+    }
+}
+
+#[test]
+#[ignore = "runs inside the sandbox through a_connection_the_registry_never_listed_is_walked_by_pid"]
+fn inner_unlisted_connection() {
+    if !inner() {
+        return;
+    }
+    let mut session = Session::start(OUTPUT).unwrap();
+    // This process owns the session's connection (excluded) plus the fakes, none registered.
+    let pid = std::process::id();
+    let fake = || {
+        a11y_builder()
+            .serve_at("/org/a11y/atspi/cache", SlowCache)
+            .unwrap()
+            .build()
+            .unwrap()
+    };
+    let (first, second) = (fake(), fake());
+    match session.tree(pid) {
+        Err(SessionError::Unanswered(m)) => assert!(m.contains("several"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+
+    // One left: walked at the root path, where the slow cache leaves the walk unanswered.
+    second.close().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let started = Instant::now();
+        match session.tree(pid) {
+            Err(SessionError::Unanswered(m)) if m.contains("several") => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the closed connection never left the bus"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(SessionError::Unanswered(m)) => {
+                assert!(m.contains("did not answer"), "{m}");
+                let took = started.elapsed();
+                assert!(took < Duration::from_secs(4), "the walk took {took:?}");
+                break;
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // None left: no accessible application, as before the scan existed.
+    first.close().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match session.tree(pid) {
+            Err(SessionError::LaunchFailed {
+                stage: "atspi",
+                message,
+            }) => {
+                assert_eq!(message, format!("no accessible application has pid {pid}"));
+                break;
+            }
+            Err(SessionError::Unanswered(_)) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    println!("unlisted ok");
+}
+
+#[test]
 fn the_cache_walk_reads_the_same_tree_as_the_per_node_walk() {
     if !session_tests() {
         return;
