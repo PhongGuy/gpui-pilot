@@ -491,7 +491,8 @@ pub(crate) fn session_command(
 /// Spawns `section.binary` through `host_command` and hands it to `start_host`. A host built
 /// for an older protocol refuses our `Hello`, names its own version and exits, so a
 /// `ProtocolMismatch` is retried once with a fresh host at that version when the server still
-/// serves it (`retry_version`); any other refusal is returned as it came.
+/// serves it; a newer or too-old host's refusal is rewritten to name the fix
+/// (`classify_mismatch`), and any other refusal is returned as it came.
 pub(crate) fn spawn_host(
     section: &ModeConfig,
     root: &Path,
@@ -503,8 +504,9 @@ pub(crate) fn spawn_host(
     let command = host_command(section, root, dir, &params, env);
     match start_host(command, dir, params.clone(), PROTOCOL_VERSION, timeouts) {
         Err(error) if error.error.code == ErrorCode::ProtocolMismatch => {
-            let Some(version) = retry_version(&error.error.message) else {
-                return Err(error);
+            let version = match classify_mismatch(error) {
+                Mismatch::Retry(version) => version,
+                Mismatch::Refuse(error) => return Err(*error),
             };
             // The refused host left its socket file behind; the retry binds the path again.
             let _ = std::fs::remove_file(dir.socket());
@@ -515,14 +517,52 @@ pub(crate) fn spawn_host(
     }
 }
 
-/// The older protocol a host named in its `ProtocolMismatch` refusal ("..., this host speaks
-/// N", worded so by every host since protocol 7), when the server still serves it.
-fn retry_version(refusal: &str) -> Option<u32> {
+/// The protocol a host named in its `ProtocolMismatch` refusal ("..., this host speaks N",
+/// worded so by every host since protocol 7).
+fn named_version(refusal: &str) -> Option<u32> {
     let (_, named) = refusal.rsplit_once("this host speaks ")?;
-    let version = named.trim().parse().ok()?;
-    (MIN_HOST_VERSION..PROTOCOL_VERSION)
-        .contains(&version)
-        .then_some(version)
+    named.trim().parse().ok()
+}
+
+/// What `spawn_host` does with a host's `ProtocolMismatch`.
+enum Mismatch {
+    /// Start a fresh host at this older, still served version.
+    Retry(u32),
+    /// Return this error: rewritten for a newer or too-old host, unchanged otherwise.
+    Refuse(Box<ToolError>),
+}
+
+/// Sorts a refusal by the version it names: a served older one is retried, one outside the
+/// served range gets a message naming which side to move, and anything else passes through.
+fn classify_mismatch(mut error: ToolError) -> Mismatch {
+    let Some(host) = named_version(&error.error.message) else {
+        return Mismatch::Refuse(Box::new(error));
+    };
+    let fix = if host > PROTOCOL_VERSION {
+        format!(
+            "the app's host speaks protocol {host}, newer than this MCP server's {PROTOCOL_VERSION}: \
+             the server process is older than the installed gpui-pilot or the app's host tag. \
+             Restart (reconnect) the MCP server, or install the gpui-pilot tag the app's host pins."
+        )
+    } else if host < MIN_HOST_VERSION {
+        format!(
+            "the app's host speaks protocol {host}, older than the oldest this server serves \
+             ({MIN_HOST_VERSION}): move the app's gpui-pilot-host to a newer tag and rebuild its \
+             pilot binary."
+        )
+    } else if host < PROTOCOL_VERSION {
+        return Mismatch::Retry(host);
+    } else {
+        return Mismatch::Refuse(Box::new(error));
+    };
+    let original = std::mem::replace(&mut error.error.message, fix);
+    Mismatch::Refuse(Box::new(
+        error
+            .with("host_version", host)
+            .with("server_version", PROTOCOL_VERSION)
+            .with("min_host_version", MIN_HOST_VERSION)
+            .with("host_message", original),
+    ))
 }
 
 /// Spawns `command` with output to `host.log` (a `private_file`), `process_group(0)` and
@@ -680,21 +720,106 @@ pub(crate) mod tests {
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
 
+    fn refused(host: u32) -> ToolError {
+        ToolError::new(
+            ErrorCode::ProtocolMismatch,
+            format!("the server speaks version {PROTOCOL_VERSION}, this host speaks {host}"),
+        )
+        .with("log_tail", "host log")
+    }
+
     #[test]
-    fn a_refused_hello_is_retried_at_the_older_version_the_host_names() {
-        let refusal = |host: u32| {
-            format!("the server speaks version {PROTOCOL_VERSION}, this host speaks {host}")
-        };
-        assert_eq!(retry_version(&refusal(8)), Some(8));
+    fn a_refusal_names_the_host_version_or_nothing() {
         assert_eq!(
-            retry_version(&refusal(MIN_HOST_VERSION)),
-            Some(MIN_HOST_VERSION)
+            named_version("the server speaks version 12, this host speaks 8"),
+            Some(8)
         );
-        // Too old, not older, or not a refusal this server can read: no retry.
-        assert_eq!(retry_version(&refusal(MIN_HOST_VERSION - 1)), None);
-        assert_eq!(retry_version(&refusal(PROTOCOL_VERSION)), None);
-        assert_eq!(retry_version(&refusal(PROTOCOL_VERSION + 1)), None);
-        assert_eq!(retry_version("version mismatch"), None);
+        assert_eq!(
+            named_version("the server speaks version 12, this host speaks 13\n"),
+            Some(13)
+        );
+        assert_eq!(named_version("version mismatch"), None);
+        assert_eq!(named_version("server speaks 1, host speaks 2"), None);
+    }
+
+    #[test]
+    fn a_refusal_naming_a_served_older_version_is_retried_at_it() {
+        for version in [MIN_HOST_VERSION, 8, PROTOCOL_VERSION - 1] {
+            let Mismatch::Retry(at) = classify_mismatch(refused(version)) else {
+                panic!("{version} was not retried");
+            };
+            assert_eq!(at, version);
+        }
+    }
+
+    #[test]
+    fn a_newer_host_is_refused_naming_a_server_restart() {
+        let newer = PROTOCOL_VERSION + 1;
+        let Mismatch::Refuse(error) = classify_mismatch(refused(newer)) else {
+            panic!("a newer host was retried");
+        };
+        assert_eq!(error.code(), ErrorCode::ProtocolMismatch);
+        let message = &error.error.message;
+        assert!(
+            message.starts_with(&format!(
+                "the app's host speaks protocol {newer}, newer than this MCP server's {PROTOCOL_VERSION}"
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains("Restart (reconnect) the MCP server"),
+            "{message}"
+        );
+        assert_eq!(error.details["host_version"], serde_json::json!(newer));
+        assert_eq!(
+            error.details["server_version"],
+            serde_json::json!(PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            error.details["min_host_version"],
+            serde_json::json!(MIN_HOST_VERSION)
+        );
+        assert_eq!(
+            error.details["host_message"],
+            serde_json::json!(refused(newer).error.message)
+        );
+        assert_eq!(error.details["log_tail"], serde_json::json!("host log"));
+    }
+
+    #[test]
+    fn a_too_old_host_is_refused_naming_a_newer_host_tag() {
+        let older = MIN_HOST_VERSION - 1;
+        let Mismatch::Refuse(error) = classify_mismatch(refused(older)) else {
+            panic!("a too-old host was retried");
+        };
+        assert_eq!(error.code(), ErrorCode::ProtocolMismatch);
+        let message = &error.error.message;
+        assert!(
+            message.starts_with(&format!(
+                "the app's host speaks protocol {older}, older than the oldest this server serves ({MIN_HOST_VERSION})"
+            )),
+            "{message}"
+        );
+        assert!(message.ends_with("rebuild its pilot binary."), "{message}");
+        assert_eq!(error.details["host_version"], serde_json::json!(older));
+        assert_eq!(error.details["log_tail"], serde_json::json!("host log"));
+    }
+
+    #[test]
+    fn an_unreadable_or_same_version_refusal_passes_through_unchanged() {
+        for text in [
+            "version mismatch".to_owned(),
+            format!(
+                "the server speaks version {PROTOCOL_VERSION}, this host speaks {PROTOCOL_VERSION}"
+            ),
+        ] {
+            let error = ToolError::new(ErrorCode::ProtocolMismatch, text.clone());
+            let Mismatch::Refuse(error) = classify_mismatch(error) else {
+                panic!("{text} was retried");
+            };
+            assert_eq!(error.error.message, text);
+            assert!(error.details.is_empty(), "{:?}", error.details);
+        }
     }
 
     fn os(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
@@ -1061,6 +1186,10 @@ pub(crate) mod tests {
             panic!("expected the host's refusal");
         };
         assert_eq!(error.code, ErrorCode::ProtocolMismatch);
+        let Mismatch::Refuse(passed) = classify_mismatch(ToolError::from(*error)) else {
+            panic!("a refusal naming no version was retried");
+        };
+        assert_eq!(passed.error.message, "server speaks 1, host speaks 2");
     }
 
     #[test]
