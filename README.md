@@ -67,6 +67,8 @@ The network in session mode is `none` by default: no network at all. With `pasta
 
 Host files are made visible inside the sandbox with `binds` in the config. Launch `args` that are absolute paths to existing files or folders are bound read-write at the same path, except device and kernel paths, Unix sockets, and anything that would expose the desktop session.
 
+The sandbox holds only the launch's own folder, the app binary itself, the gpui-pilot binary and these binds; the project root and the binary's folder are not there. The app starts in its launch's data folder under `/tmp/gpui-pilot-<uid>/`, so a relative path in the app or in a launch `env` value resolves there, not in the project. A path that climbs out through `..` from a folder that is not bound, such as `env!("CARGO_MANIFEST_DIR")` joined with `../../assets`, fails even when `assets` is bound, because every folder along the path must exist. Give the app an absolute path through `env` (`launch {"mode": "session", "env": {"MY_ASSETS": "/home/me/app/assets"}}`), normalise the path when the app is built, or embed the files.
+
 ### Protocol version
 
 The server and host agree on a protocol version in their first message. This release speaks protocol 12. The server still launches hosts back to protocol 7: it retries at the version the host names and answers `Unsupported` for the features an older host lacks (`a11y` on `frames` needs 12, `resize` needs 11, `drop` 10, a right or middle `drag` 9, `modifiers` on `click` and `drag` 8). To use a newer feature, move the app's `gpui-pilot-host` to the matching tag and rebuild the pilot binary.
