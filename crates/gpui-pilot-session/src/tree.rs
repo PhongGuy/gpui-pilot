@@ -232,10 +232,12 @@ fn snapshot(app: (&str, &str), items: Vec<CacheItem>) -> Option<Vec<(Vec<u64>, C
         parent[i] = p;
         listed[p] += 1;
     }
-    if items
-        .iter()
-        .zip(&listed)
-        .any(|(item, &n)| i64::from(item.children) != n)
+    // An application with nothing listed under it is an empty cache, not an empty window.
+    if listed[root] == 0
+        || items
+            .iter()
+            .zip(&listed)
+            .any(|(item, &n)| i64::from(item.children) != n)
     {
         return None;
     }
@@ -858,6 +860,14 @@ mod tests {
         assert!(
             broken(|i| i.truncate(1)).is_none(),
             "only the application: Qt's empty answer"
+        );
+        assert!(
+            broken(|i| {
+                i.truncate(1);
+                i[0].children = 0;
+            })
+            .is_none(),
+            "nothing listed under the application"
         );
         assert!(snapshot(APP, Vec::new()).is_none(), "no items at all");
     }
