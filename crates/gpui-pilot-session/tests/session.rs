@@ -267,6 +267,111 @@ fn inner_unlisted_connection() {
 }
 
 #[test]
+fn an_app_the_registry_hides_is_still_read_by_pid() {
+    outer("inner_registry_drop", "registry drop ok");
+}
+
+/// Whether the registry's root lists an application whose connection belongs to `pid`.
+fn listed(a11y: &zbus::blocking::Connection, pid: u32) -> bool {
+    let root = atspi_proxies::accessible::AccessibleProxyBlocking::builder(a11y)
+        .destination("org.a11y.atspi.Registry")
+        .unwrap()
+        .path("/org/a11y/atspi/accessible/root")
+        .unwrap()
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .unwrap();
+    let dbus = zbus::blocking::fdo::DBusProxy::new(a11y).unwrap();
+    root.get_children()
+        .unwrap()
+        .iter()
+        .filter_map(|app| app.name_as_str())
+        .any(|name| {
+            zbus::names::BusName::try_from(name)
+                .ok()
+                .and_then(|name| dbus.get_connection_unix_process_id(name).ok())
+                == Some(pid)
+        })
+}
+
+#[test]
+#[ignore = "runs inside the sandbox through an_app_the_registry_hides_is_still_read_by_pid"]
+fn inner_registry_drop() {
+    if !inner() {
+        return;
+    }
+    use rustix::process::{Pid, Signal, kill_process};
+    let mut session = Session::start(OUTPUT).unwrap();
+    // The registry started inside `start`; its first ping leaves about 30 s from here.
+    let started = Instant::now();
+    let demo = Demo::spawn();
+    session
+        .wait_window(demo.pid(), Duration::from_secs(15))
+        .unwrap();
+    session
+        .place(demo.pid(), Rect::new(0., 0., 1280., 800.))
+        .unwrap();
+    settled_tree(&mut session, demo.pid(), |nodes| {
+        nodes.iter().any(|n| n.id.as_deref() == Some("count"))
+    });
+    let a11y = a11y_builder().build().unwrap();
+    let listed_by = Instant::now() + Duration::from_secs(5);
+    while !listed(&a11y, demo.pid()) {
+        assert!(
+            Instant::now() < listed_by,
+            "the registry never listed the demo"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Stopped from 25 s until the registry hides it: across the first ping window, or the
+    // second should start-up have run long.
+    let stop_at = started + Duration::from_secs(25);
+    let now = Instant::now();
+    assert!(
+        now < stop_at,
+        "setup took {:?}, past the stop at 25 s",
+        now - started
+    );
+    std::thread::sleep(stop_at - now);
+    let pid = Pid::from_child(&demo.child);
+    let resume = Resume(pid);
+    kill_process(pid, Signal::STOP).unwrap();
+    let give_up = started + Duration::from_secs(75);
+    while listed(&a11y, demo.pid()) {
+        assert!(
+            Instant::now() < give_up,
+            "the registry still listed the stopped demo 75 s after it started"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let hidden = started.elapsed();
+    drop(resume);
+
+    // Hidden until its next answered ping, about 30 s on: the tree is read by pid meanwhile.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let nodes = loop {
+        match session.tree(demo.pid()) {
+            Ok(nodes) if nodes.iter().any(|n| n.id.as_deref() == Some("count")) => break nodes,
+            Ok(_) | Err(SessionError::Unanswered(_)) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            other => panic!("the hidden demo was not read: {other:?}"),
+        }
+    };
+    assert!(nodes.len() > 1);
+    assert!(
+        !listed(&a11y, demo.pid()),
+        "the registry listed the demo again before the read ({:?} after start); the read proves nothing",
+        started.elapsed()
+    );
+    println!(
+        "registry drop ok: hidden at {hidden:?}, read at {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn the_cache_walk_reads_the_same_tree_as_the_per_node_walk() {
     if !session_tests() {
         return;
