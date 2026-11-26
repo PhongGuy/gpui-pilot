@@ -489,7 +489,8 @@ impl Session {
     }
 
     /// The app's accessible nodes below its application object, sorted by top, left, then
-    /// path. `LaunchFailed` (stage `atspi`) when no application on the bus belongs to `pid`.
+    /// path. `LaunchFailed` (stage `atspi`) when no application on the bus belongs to `pid`, or
+    /// when the application object leaves the bus during the walk.
     pub fn tree(&mut self, pid: u32) -> Result<Vec<Node>, SessionError> {
         self.tree_until(pid, Instant::now() + crate::tree::WALK_LIMIT)
     }

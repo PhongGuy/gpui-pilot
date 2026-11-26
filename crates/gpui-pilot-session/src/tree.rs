@@ -541,11 +541,14 @@ fn application(a11y: &impl A11yBus, pid: u32) -> Result<(String, String), Sessio
         }),
         // Guessing between a toolkit's two connections could walk the wrong tree.
         (Some(_), Some(_)) => Err(SessionError::Unanswered(format!(
-            "the AT-SPI registry stopped listing the app and several accessibility connections \
-             share its pid {pid}"
+            "the AT-SPI registry stopped listing the app and {SEVERAL_CONNECTIONS} {pid}"
         ))),
     }
 }
+
+/// The words naming the several-connections `Unanswered`, which only the registry listing the
+/// app again clears; `stalled` reads them to word its `Timeout`.
+pub(crate) const SEVERAL_CONNECTIONS: &str = "several accessibility connections share its pid";
 
 fn accessible<'a>(
     a11y: &Connection,

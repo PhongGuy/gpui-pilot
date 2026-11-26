@@ -578,7 +578,10 @@ impl Agent {
         let mut last: Option<Vec<Node>> = None;
         let mut unanswered = None;
         loop {
-            let why = match self.session.tree_until(self.app.pid(), deadline) {
+            let why = match walk_why(
+                self.session.tree_until(self.app.pid(), deadline),
+                &mut unanswered,
+            ) {
                 Ok(nodes) => {
                     let why = match &last {
                         Some(last) => match tree::unstable(last, &nodes) {
@@ -590,7 +593,7 @@ impl Agent {
                     last = Some(nodes);
                     why.to_owned()
                 }
-                Err(error) => failed_walk_why(error, &mut unanswered),
+                Err(why) => why,
             };
             if Instant::now() >= deadline {
                 return Err(SessionError::LaunchFailed {
@@ -1204,9 +1207,14 @@ fn stalled(
     match error {
         SessionError::Unanswered(_) if one_look => Err(error),
         SessionError::Unanswered(message) if now >= deadline => {
+            // Several connections sharing the pid is no busy app: only the registry clears it.
+            let cause = if message.contains(tree::SEVERAL_CONNECTIONS) {
+                "(this clears once the AT-SPI registry lists the app again)"
+            } else {
+                "(the app is busy, or its accessibility connection is behind)"
+            };
             Err(SessionError::Timeout(format!(
-                "after {timeout_ms} ms: {message} (the app is busy, or its accessibility \
-                 connection is behind)"
+                "after {timeout_ms} ms: {message} {cause}"
             )))
         }
         SessionError::Unanswered(_) => Ok(()),
@@ -1236,6 +1244,21 @@ fn request_error(error: SessionError, app_exited: bool) -> Option<PilotError> {
         ),
         error => error.into(),
     })
+}
+
+/// A launch walk's nodes, or why it failed (`failed_walk_why`). A walk that answers clears the
+/// remembered `Unanswered`, so a later overrun reports its own cause.
+fn walk_why<T>(
+    walk: Result<T, SessionError>,
+    unanswered: &mut Option<String>,
+) -> Result<T, String> {
+    match walk {
+        Ok(nodes) => {
+            *unanswered = None;
+            Ok(nodes)
+        }
+        Err(error) => Err(failed_walk_why(error, unanswered)),
+    }
 }
 
 /// Why a launch walk failed, for `LaunchFailed`. An `Unanswered` walk is remembered in
@@ -1281,6 +1304,18 @@ mod tests {
             &mut seen,
         );
         assert_eq!(other, "stage x: gone");
+    }
+
+    #[test]
+    fn a_walk_that_succeeds_forgets_an_earlier_unanswered_one() {
+        let mut seen = None;
+        let unanswered = SessionError::Unanswered("the app did not answer".into());
+        assert!(walk_why::<()>(Err(unanswered), &mut seen).is_err());
+        assert_eq!(walk_why(Ok(7), &mut seen), Ok(7));
+        let overran = SessionError::Timeout("passed its deadline after 0 nodes".into());
+        let why = walk_why::<()>(Err(overran), &mut seen).unwrap_err();
+        assert!(!why.contains("not answering"), "{why}");
+        assert!(why.contains("passed its deadline"), "{why}");
     }
 
     #[test]
@@ -1643,6 +1678,23 @@ mod tests {
                     m.ends_with("(the app is busy, or its accessibility connection is behind)"),
                     "{m}"
                 );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn several_connections_at_the_deadline_name_the_registry_not_a_busy_app() {
+        let now = Instant::now();
+        let several = SessionError::Unanswered(format!(
+            "the AT-SPI registry stopped listing the app and {} 42",
+            tree::SEVERAL_CONNECTIONS
+        ));
+        match stalled(several, now, now, false, 1000) {
+            Err(SessionError::Timeout(m)) => {
+                assert!(m.contains("several"), "{m}");
+                assert!(!m.contains("the app is busy"), "{m}");
+                assert!(m.contains("registry lists the app again"), "{m}");
             }
             other => panic!("{other:?}"),
         }
