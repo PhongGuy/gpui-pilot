@@ -39,8 +39,8 @@ pub enum PathPrompt {
     },
 }
 
-/// What an answer did: completed an open or save dialog, waited for the next one, or
-/// cancelled the pending one.
+/// What an answer did: completed an open or save dialog, waited for the next one,
+/// cancelled the pending one or resolved it to an error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PromptAnswered {
@@ -48,6 +48,7 @@ pub enum PromptAnswered {
     Save,
     Queued,
     Cancelled,
+    Failed,
 }
 
 /// A side effect the app asked for that the pilot logged instead of performing.
@@ -67,25 +68,40 @@ enum Reply {
     Save(oneshot::Sender<Result<Option<PathBuf>>>),
 }
 
+/// An answer for a dialog, held in the pending/queued slot until a dialog takes it.
+enum Answer {
+    Paths(Vec<PathBuf>),
+    Cancel,
+    Fail(String),
+}
+
 impl Reply {
     /// Completes the dialog; a save answered with several paths takes the first.
-    fn send(self, paths: Option<Vec<PathBuf>>) -> PromptAnswered {
-        match (self, paths) {
-            (Reply::Open(tx), Some(paths)) => {
+    fn send(self, answer: Answer) -> PromptAnswered {
+        match (self, answer) {
+            (Reply::Open(tx), Answer::Paths(paths)) => {
                 tx.send(Ok(Some(paths))).ok();
                 PromptAnswered::Open
             }
-            (Reply::Save(tx), Some(paths)) => {
+            (Reply::Save(tx), Answer::Paths(paths)) => {
                 tx.send(Ok(paths.into_iter().next())).ok();
                 PromptAnswered::Save
             }
-            (Reply::Open(tx), None) => {
+            (Reply::Open(tx), Answer::Cancel) => {
                 tx.send(Ok(None)).ok();
                 PromptAnswered::Cancelled
             }
-            (Reply::Save(tx), None) => {
+            (Reply::Save(tx), Answer::Cancel) => {
                 tx.send(Ok(None)).ok();
                 PromptAnswered::Cancelled
+            }
+            (Reply::Open(tx), Answer::Fail(message)) => {
+                tx.send(Err(anyhow!(message))).ok();
+                PromptAnswered::Failed
+            }
+            (Reply::Save(tx), Answer::Fail(message)) => {
+                tx.send(Err(anyhow!(message))).ok();
+                PromptAnswered::Failed
             }
         }
     }
@@ -94,7 +110,7 @@ impl Reply {
 #[derive(Default)]
 struct State {
     pending: Option<(PathPrompt, Reply)>,
-    queued: Option<Option<Vec<PathBuf>>>,
+    queued: Option<Answer>,
     clipboard: Option<ClipboardItem>,
     primary: Option<ClipboardItem>,
     credentials: HashMap<String, (String, Vec<u8>)>,
@@ -220,11 +236,21 @@ impl PilotPlatform {
         &self,
         paths: Option<Vec<PathBuf>>,
     ) -> (PromptAnswered, Option<PathPrompt>) {
+        self.deliver(paths.map_or(Answer::Cancel, Answer::Paths))
+    }
+
+    /// Resolves the pending dialog to `Err(message)`; with nothing pending the failure is
+    /// queued for the next dialog, as any answer is.
+    pub fn fail_prompt(&self, message: String) -> (PromptAnswered, Option<PathPrompt>) {
+        self.deliver(Answer::Fail(message))
+    }
+
+    fn deliver(&self, answer: Answer) -> (PromptAnswered, Option<PathPrompt>) {
         let pending = self.state.borrow_mut().pending.take();
         match pending {
-            Some((prompt, reply)) => (reply.send(paths), Some(prompt)),
+            Some((prompt, reply)) => (reply.send(answer), Some(prompt)),
             None => {
-                self.state.borrow_mut().queued = Some(paths);
+                self.state.borrow_mut().queued = Some(answer);
                 (PromptAnswered::Queued, None)
             }
         }
@@ -255,13 +281,13 @@ impl PilotPlatform {
     /// dialog it replaces is cancelled.
     fn open_prompt(&self, prompt: PathPrompt, reply: Reply) {
         let queued = self.state.borrow_mut().queued.take();
-        if let Some(paths) = queued {
-            reply.send(paths);
+        if let Some(answer) = queued {
+            reply.send(answer);
             return;
         }
         let replaced = self.state.borrow_mut().pending.replace((prompt, reply));
         if let Some((_, old)) = replaced {
-            old.send(None);
+            old.send(Answer::Cancel);
         }
     }
 }

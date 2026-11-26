@@ -351,12 +351,12 @@ impl Pilot {
             Request::PickFile {
                 answer, settle_ms, ..
             } => {
-                let paths = match answer {
-                    PickAnswer::Paths(paths) => Some(paths),
-                    PickAnswer::Cancel => None,
+                let (answered, prompt) = match answer {
+                    PickAnswer::Paths(paths) => self.platform.answer_prompt(Some(paths)),
+                    PickAnswer::Cancel => self.platform.answer_prompt(None),
+                    PickAnswer::Fail(message) => self.platform.fail_prompt(message),
                     other => return Err(unsupported(format!("pick answer {other:?}"))),
                 };
-                let (answered, prompt) = self.platform.answer_prompt(paths);
                 let settled = self.settle(&window, cx, settle_ms).await;
                 Ok(Reply::PickFile {
                     answered: answered_of(answered),
@@ -948,6 +948,7 @@ fn answered_of(answered: PromptAnswered) -> Answered {
         PromptAnswered::Save => Answered::Save,
         PromptAnswered::Queued => Answered::Queued,
         PromptAnswered::Cancelled => Answered::Cancelled,
+        PromptAnswered::Failed => Answered::Failed,
     }
 }
 
