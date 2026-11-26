@@ -4,11 +4,12 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{Demo, OUTPUT, inner, run_inside, session_tests};
+use common::{Demo, OUTPUT, inner, run_inside, session_tests, timing_dir};
 use gpui_pilot_protocol::{Modifier, MouseButton, Rect, Wheel};
 use gpui_pilot_session::Session;
 use gpui_pilot_session::SessionError;
-use gpui_pilot_session::sandbox::Output;
+use gpui_pilot_session::Walked;
+use gpui_pilot_session::sandbox::{Bind, Output};
 
 /// Runs `inner` inside the sandbox when the session suite is enabled.
 fn outer(inner: &str, done: &str) {
@@ -152,11 +153,136 @@ fn inner_stopped_app() {
     // Resumed, the app answers its backlog first; the next walk still reads its own replies,
     // and the registry still lists the app.
     drop(resume);
-    let after = settled_tree(&mut session, demo.pid(), |nodes| {
+    settled_tree(&mut session, demo.pid(), |nodes| {
         nodes.iter().any(|n| n.id.as_deref() == Some("count"))
     });
+    let (after, walked) = session.tree_walked(demo.pid(), false).unwrap();
+    assert_eq!(
+        walked,
+        Walked::Cache,
+        "the resumed app's cache is read again"
+    );
     assert_eq!(ids(&after), ids(&before));
     println!("stopped ok");
+}
+
+#[test]
+fn the_cache_walk_reads_the_same_tree_as_the_per_node_walk() {
+    if !session_tests() {
+        return;
+    }
+    let timing = timing_dir();
+    assert!(
+        timing.join("pilot-demo-windowed").exists(),
+        "{} is missing; run `cargo build -p gpui-pilot -p pilot-demo --bins --profile timing` first",
+        timing.join("pilot-demo-windowed").display()
+    );
+    let out = run_inside("inner_cache_walk", OUTPUT, |sandbox| {
+        sandbox.binds.push(Bind::ro(timing));
+    });
+    assert!(out.contains("cache walk ok"), "{out}");
+}
+
+fn shapes(nodes: &[gpui_pilot_protocol::Node]) -> usize {
+    nodes
+        .iter()
+        .filter(|n| n.id.as_deref().is_some_and(|id| id.starts_with("shape-")))
+        .count()
+}
+
+/// `nodes` as JSON sorted by path, canvas shapes' bounds blanked: a panning board moves them
+/// between two walks, and their order with them.
+fn without_shape_bounds(nodes: &[gpui_pilot_protocol::Node]) -> Vec<serde_json::Value> {
+    let mut out: Vec<_> = nodes
+        .iter()
+        .map(|n| {
+            let mut v = serde_json::to_value(n).unwrap();
+            if n.id.as_deref().is_some_and(|id| id.starts_with("shape-")) {
+                v["bounds"] = serde_json::Value::Null;
+            }
+            v
+        })
+        .collect();
+    out.sort_by_key(|v| v["path"].to_string());
+    out
+}
+
+#[test]
+#[ignore = "runs inside the sandbox through the_cache_walk_reads_the_same_tree_as_the_per_node_walk"]
+fn inner_cache_walk() {
+    if !inner() {
+        return;
+    }
+    let mut session = Session::start(OUTPUT).unwrap();
+
+    // Static, on the dev demo the gate builds: wait for two equal reads, then each cache walk
+    // must serialise byte-equal to the per-node walk that follows it.
+    let demo = Demo::spawn_args(&["--board-shapes", "400"]);
+    session
+        .wait_window(demo.pid(), Duration::from_secs(15))
+        .unwrap();
+    session
+        .place(demo.pid(), Rect::new(0., 0., 1280., 800.))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = session.tree(demo.pid()).unwrap();
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let now = session.tree(demo.pid()).unwrap();
+        if now == last && shapes(&now) == 400 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the board never held still: {} shapes",
+            shapes(&now)
+        );
+        last = now;
+    }
+    for _ in 0..3 {
+        let (cached, by_cache) = session.tree_walked(demo.pid(), false).unwrap();
+        let (old, by_node) = session.tree_walked(demo.pid(), true).unwrap();
+        assert_eq!((by_cache, by_node), (Walked::Cache, Walked::Fallback));
+        assert_eq!(shapes(&cached), 400);
+        assert_eq!(
+            serde_json::to_string(&cached).unwrap(),
+            serde_json::to_string(&old).unwrap()
+        );
+    }
+    drop(demo);
+
+    // Panning, on the timing demo (a debug one panning 400 shapes answers no walk): equal in
+    // every field but the shapes' bounds.
+    let path = timing_dir().join("pilot-demo-windowed");
+    let demo = Demo::spawn_from(&path, &["--board-shapes", "400", "--board-autopan-now"]);
+    session
+        .wait_window(demo.pid(), Duration::from_secs(15))
+        .unwrap();
+    session
+        .place(demo.pid(), Rect::new(0., 0., 1280., 800.))
+        .unwrap();
+    settled_tree(&mut session, demo.pid(), |nodes| shapes(nodes) == 400);
+    let mut xs = Vec::new();
+    for _ in 0..3 {
+        let (cached, by_cache) = session.tree_walked(demo.pid(), false).unwrap();
+        let (old, by_node) = session.tree_walked(demo.pid(), true).unwrap();
+        assert_eq!((by_cache, by_node), (Walked::Cache, Walked::Fallback));
+        assert_eq!(without_shape_bounds(&cached), without_shape_bounds(&old));
+        for nodes in [&cached, &old] {
+            let x = nodes
+                .iter()
+                .find(|n| n.id.as_deref() == Some("shape-0"))
+                .unwrap()
+                .bounds
+                .x;
+            xs.push(x);
+        }
+    }
+    assert!(
+        xs.windows(2).any(|w| w[0] != w[1]),
+        "the board never panned: {xs:?}"
+    );
+    println!("cache walk ok");
 }
 
 #[test]
