@@ -1195,3 +1195,30 @@ fn calls_after_launch_wait_out_a_short_accessibility_stall() {
     assert!(took < Duration::from_millis(4500), "took {took:?}");
     assert_eq!(agent.ok(Request::Close), Reply::Closed);
 }
+
+#[test]
+fn a_failing_pick_is_unsupported_in_session_mode_and_waits_for_no_dialog() {
+    if !session_tests() {
+        return;
+    }
+    let (mut agent, hello) = Agent::start(PROTOCOL_VERSION);
+    assert!(
+        matches!(hello, Outcome::Ok(Reply::Hello { .. })),
+        "{hello:?}"
+    );
+    agent.wait_state("opened");
+    let error = agent.err(Request::PickFile {
+        answer: PickAnswer::Fail("disk gone".into()),
+        settle_ms: 0,
+        timeout_ms: Some(1000),
+    });
+    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert!(
+        error
+            .message
+            .starts_with("`fail` on pick_file is headless only"),
+        "{}",
+        error.message
+    );
+    assert_eq!(agent.ok(Request::Close), Reply::Closed);
+}

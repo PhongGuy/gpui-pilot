@@ -440,6 +440,12 @@ impl Driver {
             }
             (Mode::Session, chosen) => chosen.unwrap_or(Network::None),
         };
+        // The session app reads the private KDE session's own colour scheme; nothing sets it.
+        if args.mode == Mode::Session && args.appearance.is_some() {
+            return Err(unsupported(
+                "`appearance` is headless only; omit it in session mode",
+            ));
+        }
         // Host ports only make sense through pasta; the X11 TCP ports would reach the desktop.
         let bad_ports = |why: &str| ToolError::new(ErrorCode::InvalidArgument, why);
         let never_pasta =
@@ -1215,6 +1221,26 @@ mod tests {
             .launch(launch(json!({"mode": "headless", "network": "pasta"})))
             .unwrap_err();
         assert_eq!(error.code(), ErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn session_mode_refuses_an_appearance_before_its_preflight() {
+        let (driver, _root) = fixture(None);
+        let mut driver = driver.with_tool_path("/nonexistent".into());
+        for appearance in ["light", "dark"] {
+            let error = driver
+                .launch(launch(json!({"mode": "session", "appearance": appearance})))
+                .unwrap_err();
+            assert_eq!(error.code(), ErrorCode::Unsupported, "{appearance}");
+            assert!(
+                error.error.message.contains("headless only"),
+                "{}",
+                error.error.message
+            );
+        }
+        // Headless passes the check; the missing config is what fails.
+        let headless = driver.launch(launch(json!({"mode": "headless", "appearance": "light"})));
+        assert_eq!(headless.unwrap_err().code(), ErrorCode::InvalidConfig);
     }
 
     #[test]
