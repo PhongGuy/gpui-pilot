@@ -1,10 +1,15 @@
 //! The app's AT-SPI tree, read from the session's accessibility bus as protocol `Node`s.
 
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use atspi_common::{CoordType, State, StateSet};
-use atspi_proxies::accessible::AccessibleProxyBlocking;
-use atspi_proxies::component::ComponentProxyBlocking;
+use atspi_common::{CacheItem, CoordType, ObjectRefOwned, State, StateSet};
+use atspi_proxies::accessible::{AccessibleProxy, AccessibleProxyBlocking};
+use atspi_proxies::component::{ComponentProxy, ComponentProxyBlocking};
 use gpui_pilot_protocol::{Node, Rect, Segment};
 use zbus::blocking::Connection;
 use zbus::proxy::CacheProperties;
@@ -17,11 +22,22 @@ const UNKNOWN_OBJECT: &str = "org.freedesktop.DBus.Error.UnknownObject";
 const NO_REPLY: &str = "org.freedesktop.DBus.Error.NoReply";
 const UNKNOWN_METHOD: &str = "org.freedesktop.DBus.Error.UnknownMethod";
 const UNKNOWN_INTERFACE: &str = "org.freedesktop.DBus.Error.UnknownInterface";
+const CACHE_PATH: &str = "/org/a11y/atspi/cache";
+const CACHE_INTERFACE: &str = "org.a11y.atspi.Cache";
 
 /// How long one call to the app may take before it counts as not answering.
 pub(crate) const CALL_LIMIT: Duration = Duration::from_secs(2);
 /// The longest one tree walk may take.
 pub(crate) const WALK_LIMIT: Duration = Duration::from_secs(10);
+
+/// Which path a walk took: the AT-SPI cache, or today's per-node walk.
+#[doc(hidden)]
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Walked {
+    Cache,
+    Fallback,
+}
 
 /// Walks every node below `pid`'s application object, sorted by top, left, then path.
 /// `content` supplies the client area relative to the surface origin: its size bounds the frame,
@@ -33,19 +49,46 @@ pub(crate) fn walk(
     deadline: Instant,
     content: impl FnOnce() -> Result<Rect, SessionError>,
 ) -> Result<Vec<Node>, SessionError> {
+    walked(a11y, pid, scale, deadline, false, content).map(|(nodes, _)| nodes)
+}
+
+/// As `walk`, also saying which path it took; `force_fallback` skips the cache.
+pub(crate) fn walked(
+    a11y: &Connection,
+    pid: u32,
+    scale: f32,
+    deadline: Instant,
+    force_fallback: bool,
+    content: impl FnOnce() -> Result<Rect, SessionError>,
+) -> Result<(Vec<Node>, Walked), SessionError> {
     let (name, path) = application(a11y, pid)?;
-    let found = collect(
-        path,
-        deadline,
-        |path| {
-            let children = accessible(a11y, &name, path)?.get_children()?;
-            Ok(children
-                .iter()
-                .map(|c| c.path_as_str().to_owned())
-                .collect())
-        },
-        |path, indices| read(a11y, &accessible(a11y, &name, path)?, &name, path, indices),
-    )?;
+    // The cache answers structure in one call; an app without a usable one takes the per-node
+    // walk on the same deadline.
+    let cached = if force_fallback {
+        None
+    } else {
+        let read = Cell::new(0);
+        let work = cached(a11y.inner(), &name, &path, &read);
+        async_io::block_on(by_deadline(work, deadline, &read))?
+    };
+    let (found, walked) = match cached {
+        Some(found) => (found, Walked::Cache),
+        None => {
+            let found = collect(
+                path,
+                deadline,
+                |path| {
+                    let children = accessible(a11y, &name, path)?.get_children()?;
+                    Ok(children
+                        .iter()
+                        .map(|c| c.path_as_str().to_owned())
+                        .collect())
+                },
+                |path, indices| read(a11y, &accessible(a11y, &name, path)?, &name, path, indices),
+            )?;
+            (found, Walked::Fallback)
+        }
+    };
     // AT-SPI counts from the wl_surface, which a client-side decoration's shadow pads beyond
     // the client area that points and captures use; one KWin script reads that inset.
     let content = content()?;
@@ -59,7 +102,106 @@ pub(crate) fn walk(
             .then(a.bounds.x.total_cmp(&b.bounds.x))
             .then_with(|| a_path.cmp(b_path))
     });
-    Ok(nodes.into_iter().map(|(_, node)| node).collect())
+    Ok((nodes.into_iter().map(|(_, node)| node).collect(), walked))
+}
+
+/// The app's nodes from one `GetItems` snapshot plus each node's id and extents, `WINDOW` nodes
+/// in flight; `Ok(None)` when the app has no usable cache. Counts nodes read in `read`.
+async fn cached(
+    conn: &zbus::Connection,
+    name: &str,
+    app_path: &str,
+    read: &Cell<usize>,
+) -> Result<Option<Vec<Raw>>, SessionError> {
+    let reply = conn
+        .call_method(
+            Some(name),
+            CACHE_PATH,
+            Some(CACHE_INTERFACE),
+            "GetItems",
+            &(),
+        )
+        .await;
+    let Some(items) = cache_reply(reply)? else {
+        return Ok(None);
+    };
+    let Some(found) = snapshot((name, app_path), items) else {
+        return Ok(None);
+    };
+    let calls = found
+        .iter()
+        .map(|(_, item)| read_node(conn, name, item.object.path_as_str()))
+        .collect();
+    let answers = match window(calls, WINDOW, read).await {
+        Ok(answers) => answers,
+        Err(error) if not_answering(&error) => return Err(unanswered()),
+        Err(error) => return Err(error.into()),
+    };
+    let answered: Vec<_> = found
+        .into_iter()
+        .zip(answers)
+        .map(|((indices, item), answer)| (indices, answer.map(|ids| (item, ids))))
+        .collect();
+    Ok(Some(
+        skip_vanished(answered)
+            .into_iter()
+            .map(|(indices, (item, (id, extents)))| Raw {
+                indices,
+                id,
+                role: format!("{:?}", item.role),
+                name: item.short_name,
+                extents,
+                state: item.states,
+            })
+            .collect(),
+    ))
+}
+
+/// One node's id and Window extents, both calls in flight together; `Ok(None)` when either
+/// answers UnknownObject; a missing Component interface reads as no extents.
+async fn read_node(
+    conn: &zbus::Connection,
+    name: &str,
+    path: &str,
+) -> zbus::Result<Option<(String, Option<(i32, i32, i32, i32)>)>> {
+    // Building a proxy without cached properties sends nothing; only the two reads go out.
+    let accessible = AccessibleProxy::builder(conn)
+        .destination(name)?
+        .path(path)?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
+    let component = ComponentProxy::builder(conn)
+        .destination(name)?
+        .path(path)?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
+    let reads = futures_lite::future::try_zip(accessible.accessible_id(), async {
+        without_interface(component.get_extents(CoordType::Window).await)
+    });
+    match reads.await {
+        Ok(answer) => Ok(Some(answer)),
+        Err(error) if vanished(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Drops every `None` entry and every entry whose path extends a `None` entry's path.
+fn skip_vanished<T>(found: Vec<(Vec<u64>, Option<T>)>) -> Vec<(Vec<u64>, T)> {
+    // Entries arrive sorted by path, so a gone node's subtree follows it directly.
+    let mut gone: Option<Vec<u64>> = None;
+    let mut kept = Vec::with_capacity(found.len());
+    for (path, value) in found {
+        if gone.as_ref().is_some_and(|g| path.starts_with(g)) {
+            continue;
+        }
+        match value {
+            Some(value) => kept.push((path, value)),
+            None => gone = Some(path),
+        }
+    }
+    kept
 }
 
 /// Depth-first from the application object at `root`, reading each node below it with its
@@ -77,10 +219,7 @@ fn collect(
     let mut stack = vec![(root, Vec::<u64>::new())];
     while let Some((path, indices)) = stack.pop() {
         if Instant::now() >= deadline {
-            return Err(SessionError::Timeout(format!(
-                "reading the accessibility tree passed its deadline after {} nodes",
-                found.len()
-            )));
+            return Err(past_deadline(found.len()));
         }
         let below_root = !indices.is_empty();
         // The application object itself is not a node; only what lies below it is read.
@@ -88,12 +227,7 @@ fn collect(
         let listed = node.and_then(|node| Ok((node, children(&path)?)));
         let (node, kids) = match listed {
             Ok(listed) => listed,
-            Err(error) if not_answering(&error) => {
-                return Err(SessionError::Unanswered(format!(
-                    "the app did not answer an accessibility request within {} s",
-                    CALL_LIMIT.as_secs()
-                )));
-            }
+            Err(error) if not_answering(&error) => return Err(unanswered()),
             Err(error) if below_root && vanished(&error) => continue,
             Err(error) => return Err(error.into()),
         };
@@ -105,6 +239,168 @@ fn collect(
         }
     }
     Ok(found)
+}
+
+/// The error for a call the app did not answer within `CALL_LIMIT`.
+fn unanswered() -> SessionError {
+    SessionError::Unanswered(format!(
+        "the app did not answer an accessibility request within {} s",
+        CALL_LIMIT.as_secs()
+    ))
+}
+
+/// The error for a walk still going at its deadline after reading `read` nodes.
+fn past_deadline(read: usize) -> SessionError {
+    SessionError::Timeout(format!(
+        "reading the accessibility tree passed its deadline after {read} nodes"
+    ))
+}
+
+/// Nodes read at once by the cache walk: two calls each.
+const WINDOW: usize = 32;
+
+/// Runs `calls` with at most `cap` in flight, answering their outputs in input order and
+/// counting finished calls in `read`; returns the first error at once, dropping every other call.
+async fn window<T, E, F>(calls: Vec<F>, cap: usize, read: &Cell<usize>) -> Result<Vec<T>, E>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    // Keep `cap` calls polled; a finished one's slot goes to the next unstarted call at once.
+    // Returning from the first error drops `flying` and `pending`, cancelling every other call.
+    let total = calls.len();
+    let mut pending = calls.into_iter().enumerate();
+    let mut flying: Vec<(usize, Pin<Box<F>>)> = Vec::with_capacity(cap);
+    let mut done: Vec<Option<T>> = (0..total).map(|_| None).collect();
+    futures_lite::future::poll_fn(|cx| {
+        loop {
+            while flying.len() < cap {
+                let Some((i, call)) = pending.next() else {
+                    break;
+                };
+                flying.push((i, Box::pin(call)));
+            }
+            let mut progressed = false;
+            let mut k = 0;
+            while k < flying.len() {
+                match flying[k].1.as_mut().poll(cx) {
+                    Poll::Ready(Ok(value)) => {
+                        let (i, _) = flying.swap_remove(k);
+                        done[i] = Some(value);
+                        read.set(read.get() + 1);
+                        progressed = true;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Pending => k += 1,
+                }
+            }
+            if read.get() == total {
+                return Poll::Ready(Ok(done.drain(..).flatten().collect()));
+            }
+            if !progressed {
+                return Poll::Pending;
+            }
+        }
+    })
+    .await
+}
+
+/// `work`, unless `deadline` passes first: then `past_deadline(read.get())`. The timer is polled
+/// first, so a deadline already past is a `Timeout` even when `work` is ready.
+async fn by_deadline<T>(
+    work: impl Future<Output = Result<T, SessionError>>,
+    deadline: Instant,
+    read: &Cell<usize>,
+) -> Result<T, SessionError> {
+    let timer = async {
+        async_io::Timer::at(deadline).await;
+        Err(past_deadline(read.get()))
+    };
+    futures_lite::future::or(timer, work).await
+}
+
+/// `Ok(Some(items))` for a reply in `CacheItem`'s signature; `Ok(None)` (fall back) for
+/// UnknownMethod, UnknownInterface or UnknownObject, or a reply in any other signature, such
+/// as Qt's legacy cache; `Err(Unanswered)` for a timeout or NoReply; any other error as is.
+fn cache_reply(reply: zbus::Result<zbus::Message>) -> Result<Option<Vec<CacheItem>>, SessionError> {
+    match reply {
+        Ok(message) => {
+            let body = message.body();
+            if *body.signature() != *<Vec<CacheItem> as zbus::zvariant::Type>::SIGNATURE {
+                return Ok(None);
+            }
+            Ok(Some(body.deserialize()?))
+        }
+        Err(error) if not_answering(&error) => Err(unanswered()),
+        Err(error) if missing(&error) || vanished(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Every item but the application's own, with its child-index path below `app` (bus name,
+/// path), sorted by path. `None` when the snapshot is not one whole tree: the application's
+/// item missing, an object listed twice, a parent not listed, a parent's child indices not
+/// exactly `0..children`, or a parent chain that never reaches the application.
+fn snapshot(app: (&str, &str), items: Vec<CacheItem>) -> Option<Vec<(Vec<u64>, CacheItem)>> {
+    // Objects are keyed by bus name and path together: the same path on another bus is another
+    // object (the registry's desktop root shares the application's path).
+    fn key(o: &ObjectRefOwned) -> (Option<&str>, &str) {
+        (o.name_as_str(), o.path_as_str())
+    }
+    let mut at = HashMap::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        if at.insert(key(&item.object), i).is_some() {
+            return None;
+        }
+    }
+    let root = *at.get(&(Some(app.0), app.1))?;
+
+    // Each listed child claims one free index below its parent's count; the counts must then
+    // match exactly, the application's included, so nothing is missing either.
+    let mut parent = vec![root; items.len()];
+    let mut listed = vec![0i64; items.len()];
+    let mut taken = HashSet::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate().filter(|(i, _)| *i != root) {
+        let p = *at.get(&key(&item.parent))?;
+        if !(0..items[p].children).contains(&item.index) || !taken.insert((p, item.index)) {
+            return None;
+        }
+        parent[i] = p;
+        listed[p] += 1;
+    }
+    // An application with nothing listed under it is an empty cache, not an empty window.
+    if listed[root] == 0
+        || items
+            .iter()
+            .zip(&listed)
+            .any(|(item, &n)| i64::from(item.children) != n)
+    {
+        return None;
+    }
+
+    // Climb each item's chain to the application; more steps than items means a cycle.
+    let mut paths = Vec::with_capacity(items.len());
+    for i in 0..items.len() {
+        let mut path = Vec::new();
+        let mut step = i;
+        while step != root {
+            if path.len() == items.len() {
+                return None;
+            }
+            path.push(items[step].index as u64);
+            step = parent[step];
+        }
+        path.reverse();
+        paths.push(path);
+    }
+    let mut found: Vec<_> = paths
+        .into_iter()
+        .zip(items)
+        .enumerate()
+        .filter(|(i, _)| *i != root)
+        .map(|(_, pair)| pair)
+        .collect();
+    found.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Some(found)
 }
 
 /// True for a call the peer did not answer in time: io `TimedOut`, or a `NoReply` error.
@@ -121,20 +417,22 @@ fn not_answering(error: &zbus::Error) -> bool {
 fn without_interface<T>(result: zbus::Result<T>) -> zbus::Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(zbus::Error::MethodError(name, ..))
-            if matches!(name.as_str(), UNKNOWN_METHOD | UNKNOWN_INTERFACE) =>
-        {
-            Ok(None)
-        }
-        Err(zbus::Error::FDO(error))
-            if matches!(
-                *error,
-                zbus::fdo::Error::UnknownMethod(_) | zbus::fdo::Error::UnknownInterface(_)
-            ) =>
-        {
-            Ok(None)
-        }
+        Err(error) if missing(&error) => Ok(None),
         Err(error) => Err(error),
+    }
+}
+
+/// True when `error` says the object lacks the method or interface called.
+fn missing(error: &zbus::Error) -> bool {
+    match error {
+        zbus::Error::MethodError(name, ..) => {
+            matches!(name.as_str(), UNKNOWN_METHOD | UNKNOWN_INTERFACE)
+        }
+        zbus::Error::FDO(error) => matches!(
+            **error,
+            zbus::fdo::Error::UnknownMethod(_) | zbus::fdo::Error::UnknownInterface(_)
+        ),
+        _ => false,
     }
 }
 
@@ -588,6 +886,333 @@ mod tests {
         assert_eq!(
             unstable(&board(0.), &roled),
             Some("the elements kept changing")
+        );
+    }
+
+    use atspi_common::{CacheItem, LegacyCacheItem, ObjectRefOwned, Role};
+
+    const BUS: &str = ":1.5";
+    const APP: (&str, &str) = (BUS, "/org/a11y/atspi/accessible/root");
+
+    fn obj(path: &'static str) -> ObjectRefOwned {
+        ObjectRefOwned::from_static_str_unchecked(BUS, path)
+    }
+
+    fn item(
+        object: ObjectRefOwned,
+        parent: ObjectRefOwned,
+        index: i32,
+        children: i32,
+    ) -> CacheItem {
+        CacheItem {
+            object,
+            parent,
+            index,
+            children,
+            ..CacheItem::default()
+        }
+    }
+
+    /// The app as accesskit lists it: first, index -1, the registry's desktop root (same path,
+    /// another bus) as parent; then a frame holding b and c (c holding c1), and d beside the frame.
+    fn app_items() -> Vec<CacheItem> {
+        let desktop =
+            ObjectRefOwned::from_static_str_unchecked(":1.0", "/org/a11y/atspi/accessible/root");
+        let app = obj("/org/a11y/atspi/accessible/root");
+        vec![
+            item(app.clone(), desktop, -1, 2),
+            item(obj("/c1"), obj("/c"), 0, 0),
+            item(obj("/d"), app.clone(), 1, 0),
+            item(obj("/b"), obj("/f"), 0, 0),
+            item(obj("/f"), app, 0, 2),
+            item(obj("/c"), obj("/f"), 1, 1),
+        ]
+    }
+
+    fn paths(found: &[(Vec<u64>, CacheItem)]) -> Vec<(Vec<u64>, &str)> {
+        found
+            .iter()
+            .map(|(p, i)| (p.clone(), i.object.path_as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn the_cache_rebuilds_each_child_index_path_below_the_application() {
+        let found = snapshot(APP, app_items()).expect("a whole snapshot");
+        assert_eq!(
+            paths(&found),
+            vec![
+                (vec![0], "/f"),
+                (vec![0, 0], "/b"),
+                (vec![0, 1], "/c"),
+                (vec![0, 1, 0], "/c1"),
+                (vec![1], "/d"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_that_breaks_an_invariant_selects_the_fallback() {
+        let broken = |change: fn(&mut Vec<CacheItem>)| {
+            let mut items = app_items();
+            change(&mut items);
+            snapshot(APP, items)
+        };
+        assert!(broken(|i| i[1].index = -2).is_none(), "a negative index");
+        assert!(broken(|i| i[1].index = 1).is_none(), "a gap under c");
+        assert!(
+            broken(|i| i[4].children = 3).is_none(),
+            "the frame counts a child not listed"
+        );
+        assert!(
+            broken(|i| i[5].index = 0).is_none(),
+            "two children at one index"
+        );
+        assert!(
+            broken(|i| i[1].parent = obj("/nowhere")).is_none(),
+            "a chain to an unknown object"
+        );
+        assert!(
+            broken(|i| i[3].parent = ObjectRefOwned::from_static_str_unchecked(":1.9", "/f"))
+                .is_none(),
+            "the right path on another bus is another object"
+        );
+        assert!(
+            broken(|i| {
+                i.push(item(obj("/x"), obj("/y"), 0, 1));
+                i.push(item(obj("/y"), obj("/x"), 0, 1));
+            })
+            .is_none(),
+            "a cycle never reaches the application"
+        );
+        assert!(
+            broken(|i| {
+                i.remove(0);
+            })
+            .is_none(),
+            "the application's own item is missing"
+        );
+        assert!(
+            broken(|i| i.truncate(1)).is_none(),
+            "only the application: Qt's empty answer"
+        );
+        assert!(
+            broken(|i| {
+                i.truncate(1);
+                i[0].children = 0;
+            })
+            .is_none(),
+            "nothing listed under the application"
+        );
+        assert!(snapshot(APP, Vec::new()).is_none(), "no items at all");
+    }
+
+    #[test]
+    fn a_snapshot_keeps_role_name_and_states_from_each_item() {
+        let mut items = app_items();
+        items[3].role = Role::CheckBox;
+        items[3].short_name = "Agree".into();
+        items[3].name = "a description, not the name".into();
+        items[3].states = [State::Showing, State::Checkable].into_iter().collect();
+        let found = snapshot(APP, items).unwrap();
+        let (_, b) = found.iter().find(|(p, _)| p == &vec![0, 0]).unwrap();
+        assert_eq!((b.role, b.short_name.as_str()), (Role::CheckBox, "Agree"));
+        assert!(b.states.contains(State::Checkable));
+    }
+
+    fn returned<B: zbus::export::serde::Serialize + zbus::zvariant::DynamicType>(
+        body: &B,
+    ) -> zbus::Result<zbus::Message> {
+        let call = zbus::Message::method_call(CACHE_PATH, "GetItems")
+            .unwrap()
+            .build(&())
+            .unwrap();
+        Ok(zbus::Message::method_return(&call.header())
+            .unwrap()
+            .build(body)
+            .unwrap())
+    }
+
+    #[test]
+    fn only_a_reply_in_cache_items_signature_is_decoded() {
+        let items = cache_reply(returned(&app_items()))
+            .unwrap()
+            .expect("decoded");
+        assert_eq!(items, app_items());
+        assert!(
+            cache_reply(returned(&Vec::<LegacyCacheItem>::new()))
+                .unwrap()
+                .is_none(),
+            "Qt's legacy cache"
+        );
+        assert!(
+            cache_reply(returned(&())).unwrap().is_none(),
+            "an empty body"
+        );
+    }
+
+    #[test]
+    fn a_missing_cache_falls_back_and_a_silent_app_is_unanswered() {
+        for name in [UNKNOWN_METHOD, UNKNOWN_INTERFACE, UNKNOWN_OBJECT] {
+            assert!(
+                cache_reply(Err(reply(name, CACHE_PATH))).unwrap().is_none(),
+                "{name}"
+            );
+        }
+        let fdo = |e: zbus::fdo::Error| Err(zbus::Error::FDO(Box::new(e)));
+        assert!(
+            cache_reply(fdo(zbus::fdo::Error::UnknownMethod("m".into())))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache_reply(fdo(zbus::fdo::Error::UnknownInterface("i".into())))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache_reply(fdo(zbus::fdo::Error::UnknownObject("o".into())))
+                .unwrap()
+                .is_none()
+        );
+        let silent = [
+            Err(timed_out("a")),
+            Err(reply(NO_REPLY, CACHE_PATH)),
+            fdo(zbus::fdo::Error::NoReply("n".into())),
+        ];
+        for error in silent {
+            match cache_reply(error) {
+                Err(SessionError::Unanswered(m)) => {
+                    assert!(m.contains("did not answer") && m.contains("2 s"), "{m}")
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        let denied = cache_reply(Err(reply(
+            "org.freedesktop.DBus.Error.AccessDenied",
+            CACHE_PATH,
+        )));
+        assert!(
+            matches!(denied, Err(SessionError::Internal(_))),
+            "{denied:?}"
+        );
+    }
+
+    use async_io::Timer;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[test]
+    fn the_window_answers_in_order_with_at_most_its_cap_in_flight() {
+        let (flying, most) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let calls: Vec<_> = (0..100usize)
+            .map(|i| {
+                let (flying, most) = (flying.clone(), most.clone());
+                async move {
+                    flying.set(flying.get() + 1);
+                    most.set(most.get().max(flying.get()));
+                    Timer::after(Duration::from_millis((i * 7 % 5) as u64)).await;
+                    flying.set(flying.get() - 1);
+                    Ok::<usize, &'static str>(i)
+                }
+            })
+            .collect();
+        let read = Cell::new(0);
+        let answered = async_io::block_on(window(calls, 32, &read)).unwrap();
+        assert_eq!(answered, (0..100).collect::<Vec<_>>());
+        assert_eq!((most.get(), read.get()), (32, 100));
+        let none = async_io::block_on(window(
+            Vec::<std::future::Ready<Result<usize, &'static str>>>::new(),
+            32,
+            &Cell::new(0),
+        ));
+        assert_eq!(none, Ok(Vec::new()));
+    }
+
+    #[test]
+    fn the_window_returns_on_the_first_error_and_drops_every_other_call() {
+        struct Dropped(Rc<Cell<usize>>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let dropped = Rc::new(Cell::new(0));
+        let calls: Vec<_> = (0..100usize)
+            .map(|i| {
+                let guard = Dropped(dropped.clone());
+                async move {
+                    let _guard = guard;
+                    if i == 5 {
+                        Timer::after(Duration::from_millis(10)).await;
+                        return Err("gone silent");
+                    }
+                    Timer::after(Duration::from_secs(60)).await;
+                    Ok::<usize, &'static str>(i)
+                }
+            })
+            .collect();
+        let started = Instant::now();
+        let result = async_io::block_on(window(calls, 32, &Cell::new(0)));
+        assert_eq!(result, Err("gone silent"));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "waited {:?}",
+            started.elapsed()
+        );
+        // The 32 in flight and the 68 never started are all gone once the window answers.
+        assert_eq!(dropped.get(), 100);
+    }
+
+    #[test]
+    fn a_cache_walk_past_its_deadline_is_a_timeout_naming_the_nodes_read() {
+        let started = Instant::now();
+        let slow = async_io::block_on(by_deadline(
+            async {
+                Timer::after(Duration::from_secs(60)).await;
+                Ok(())
+            },
+            started + Duration::from_millis(50),
+            &Cell::new(3),
+        ));
+        match slow {
+            Err(SessionError::Timeout(m)) => {
+                assert!(m.contains("passed its deadline after 3 nodes"), "{m}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let late = async_io::block_on(by_deadline(async { Ok(()) }, Instant::now(), &Cell::new(0)));
+        match late {
+            Err(SessionError::Timeout(m)) => assert!(m.contains("after 0 nodes"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        let quick = async_io::block_on(by_deadline(
+            async { Ok(7) },
+            Instant::now() + Duration::from_secs(60),
+            &Cell::new(0),
+        ));
+        assert_eq!(quick.unwrap(), 7);
+    }
+
+    #[test]
+    fn a_node_vanishing_during_its_reads_drops_its_snapshot_subtree() {
+        let found = vec![
+            (vec![0], Some("frame")),
+            (vec![0, 0], None),
+            (vec![0, 0, 0], Some("under the gone node")),
+            (vec![0, 0, 0, 1], Some("deeper under it")),
+            (vec![0, 1], Some("its sibling")),
+            (vec![1], Some("beside the frame")),
+        ];
+        let kept: Vec<_> = skip_vanished(found).into_iter().collect();
+        assert_eq!(
+            kept,
+            vec![
+                (vec![0], "frame"),
+                (vec![0, 1], "its sibling"),
+                (vec![1], "beside the frame")
+            ]
         );
     }
 }

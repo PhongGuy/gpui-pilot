@@ -898,8 +898,9 @@ async fn a_session_tree_of_400_shapes_reads_within_its_budget() {
         .await;
     let tree = pilot.ok("tree", json!({})).await;
     assert_eq!(shapes_in(&tree), 400);
-    // Budget above the worst 400-shape walk measured; see
-    // docs/research/2026-11-25-session-canvas-shapes.md.
+    // Three times the slowest tree call measured with the cache walk; see
+    // docs/research/2026-11-26-session-walk-budget.md.
+    const BUDGET_MS: f64 = 70.;
     let mut ms = Vec::new();
     for _ in 0..10 {
         let started = Instant::now();
@@ -910,9 +911,10 @@ async fn a_session_tree_of_400_shapes_reads_within_its_budget() {
     }
     ms.sort_by(f64::total_cmp);
     let p95 = ms[9];
+    eprintln!("tree at 400 shapes, ms sorted: {ms:?}");
     assert!(
-        p95 <= 400.,
-        "p95 of 10 tree reads at 400 shapes is {p95:.1} ms, over 400 ms: {ms:?}; {}",
+        p95 <= BUDGET_MS,
+        "p95 of 10 tree reads at 400 shapes is {p95:.1} ms, over {BUDGET_MS} ms: {ms:?}; {}",
         common::load::report()
     );
     pilot.ok("close", json!({})).await;

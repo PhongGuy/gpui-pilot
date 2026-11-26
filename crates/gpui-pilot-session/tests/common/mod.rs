@@ -5,7 +5,7 @@
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
@@ -52,6 +52,11 @@ pub fn target_dir() -> PathBuf {
 
 pub fn demo_path() -> PathBuf {
     target_dir().join("pilot-demo-windowed")
+}
+
+/// The `timing` profile's directory beside this test binary's profile directory.
+pub fn timing_dir() -> PathBuf {
+    target_dir().parent().unwrap().join("timing")
 }
 
 /// Bounds a whole sandboxed run from the host side, startup included.
@@ -138,16 +143,21 @@ impl Demo {
 
     /// Spawns the demo with each `(name, value)` pair set in its environment.
     pub fn spawn_with(env: &[(&str, &str)]) -> Demo {
-        Demo::spawn_env_args(env, &[])
+        Demo::spawn_env_args(&demo_path(), env, &[])
     }
 
     /// Spawns the demo with `args` on its command line.
     pub fn spawn_args(args: &[&str]) -> Demo {
-        Demo::spawn_env_args(&[], args)
+        Demo::spawn_env_args(&demo_path(), &[], args)
     }
 
-    fn spawn_env_args(env: &[(&str, &str)], args: &[&str]) -> Demo {
-        let mut child = Command::new(demo_path())
+    /// Spawns the windowed demo binary at `path` with `args`.
+    pub fn spawn_from(path: &Path, args: &[&str]) -> Demo {
+        Demo::spawn_env_args(path, &[], args)
+    }
+
+    fn spawn_env_args(path: &Path, env: &[(&str, &str)], args: &[&str]) -> Demo {
+        let mut child = Command::new(path)
             .args(args)
             .envs(env.iter().copied())
             .stdout(Stdio::piped())
